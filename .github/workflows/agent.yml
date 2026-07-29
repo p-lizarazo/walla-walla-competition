@@ -1,0 +1,46 @@
+name: agent
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: test, build and validate agent.zip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the hosted image's packages
+        run: |
+          python -m pip install --upgrade pip
+          # Mirrors the runtime image so CI fails the same way production would.
+          pip install anthropic httpx requests beautifulsoup4 lxml numpy pandas pytest
+          pip install -r prod-agent/requirements.txt
+
+      - name: Run tests
+        working-directory: prod-agent
+        run: python -m pytest tests -q
+
+      - name: Build agent.zip
+        run: python ops/build_agent.py
+
+      - name: Validate agent.zip is submittable
+        run: python ops/validate_agent.py agent.zip
+
+      - name: List archive contents
+        run: python -m zipfile -l agent.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-zip
+          path: agent.zip
+          if-no-files-found: error
+          retention-days: 30

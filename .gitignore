@@ -16,8 +16,9 @@ __pycache__/
 *.zip
 agent.zip
 
-# Runtime learning data
+# Runtime evaluation data
 **/learnings.jsonl
+**/practice_results.jsonl
 
 # macOS metadata
 .DS_Store
