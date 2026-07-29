@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ast
+from collections import defaultdict
 import csv
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 from html.parser import HTMLParser
 import io
+import json
 import pathlib
 import re
 import time
@@ -73,6 +76,10 @@ class FastPathSolver:
             self._leaderboard,
             self._recurrence_sum,
             self._infeasible_hash_work,
+            self._dirty_ledger,
+            self._event_horizon,
+            self._join_the_dots,
+            self._session_hunter,
             self._regional_sales,
             self._encrypted_bundle,
             self._members_vault,
@@ -273,6 +280,229 @@ class FastPathSolver:
             f"a random SHA-256 prefix of {bits} zero bits needs 2^{bits} trials on average",
             "the prompt explicitly assigns infeasible expected compute to WORKFACTOR",
             "the threshold is far beyond the event runtime and hardware budget",
+        )
+
+    @staticmethod
+    def _dirty_ledger(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        match = re.search(
+            r"amount column is messy.*?status is exactly ['\"]([^'\"]+)['\"]",
+            task.prompt,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match or "transactions.csv" not in task.files:
+            return False
+        if workdir is None:
+            return True
+        target_status = match.group(1)
+        total = Decimal("0")
+        included = 0
+        skipped = 0
+        with (workdir / "transactions.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as handle:
+            for row in csv.DictReader(handle):
+                if row.get("status") != target_status:
+                    continue
+                raw = (row.get("amount") or "").strip()
+                cleaned = re.sub(
+                    r"(?i)\bUSD\b", "", raw
+                ).replace("$", "").replace(",", "").strip()
+                try:
+                    amount = Decimal(cleaned)
+                except InvalidOperation:
+                    skipped += 1
+                    continue
+                total += amount
+                included += 1
+        answer = format(
+            total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f"
+        )
+        return answer, (
+            f"filtered rows by exact status {target_status!r}",
+            f"parsed and summed {included} valid currency values",
+            f"skipped {skipped} blank or non-numeric matching rows",
+        )
+
+    @staticmethod
+    def _event_horizon(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        match = re.search(
+            r"events of type ['\"]([^'\"]+)['\"].*?"
+            r"UTC date from (\d{4}-\d{2}-\d{2}) through "
+            r"(\d{4}-\d{2}-\d{2}) inclusive",
+            task.prompt,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match or "events.jsonl" not in task.files:
+            return False
+        if workdir is None:
+            return True
+        event_type, start_date, end_date = match.groups()
+        counts: dict[str, int] = defaultdict(int)
+        rows = 0
+        with (workdir / "events.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                event = json.loads(line)
+                if (
+                    event.get("type") == event_type
+                    and start_date <= str(event.get("ts", ""))[:10] <= end_date
+                ):
+                    counts[str(event["user"])] += 1
+                    rows += 1
+        if not counts:
+            raise ValueError("no matching events were found")
+        ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        if len(ordered) > 1 and ordered[0][1] == ordered[1][1]:
+            raise ValueError("event winner is not unique")
+        return ordered[0][0], (
+            f"parsed every JSONL record and matched {rows} events",
+            f"applied inclusive UTC dates {start_date} through {end_date}",
+            "verified that the highest event count is unique",
+        )
+
+    @staticmethod
+    def _join_the_dots(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        lowered_prompt = task.prompt.lower()
+        if (
+            "orders.jsonl" not in task.files
+            or "users.csv" not in task.files
+            or "keep only the first occurrence" not in lowered_prompt
+            or "exclude orders whose status is 'refunded'"
+            not in lowered_prompt
+        ):
+            return False
+        if workdir is None:
+            return True
+        users: dict[str, str] = {}
+        with (workdir / "users.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as handle:
+            for row in csv.DictReader(handle):
+                users[str(row["id"])] = str(row["email"])
+        seen: set[str] = set()
+        totals: dict[str, int] = defaultdict(int)
+        kept = 0
+        with (workdir / "orders.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                order = json.loads(line)
+                order_id = str(order["order_id"])
+                if order_id in seen:
+                    continue
+                seen.add(order_id)
+                if order.get("status") == "refunded":
+                    continue
+                totals[str(order["user_id"])] += int(order["amount_cents"])
+                kept += 1
+        if not totals:
+            raise ValueError("no eligible orders were found")
+        ordered = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+        if len(ordered) > 1 and ordered[0][1] == ordered[1][1]:
+            raise ValueError("highest user total is not unique")
+        winner_id = ordered[0][0]
+        if winner_id not in users:
+            raise ValueError("winning user is missing from users.csv")
+        return users[winner_id], (
+            f"deduplicated {len(seen)} order ids in file order",
+            f"summed {kept} non-refunded first occurrences",
+            "verified a unique highest total and joined it to users.csv",
+        )
+
+    @staticmethod
+    def _session_hunter(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        match = re.search(
+            r"during ([A-Za-z]+) (\d{4}).*?"
+            r"(\d+)(?:st|nd|rd|th)-highest"
+            r"(?:\s+[A-Za-z-]+)*\s+count",
+            task.prompt,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if (
+            not match
+            or "server.log" not in task.files
+            or "gap of more than 30 minutes" not in task.prompt
+        ):
+            return False
+        if workdir is None:
+            return True
+        month_name, year_text, rank_text = match.groups()
+        target_month = datetime.strptime(month_name, "%B").month
+        target_year = int(year_text)
+        target_rank = int(rank_text)
+        events: dict[str, list[datetime]] = defaultdict(list)
+        timestamp_patterns = (
+            (
+                re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"),
+                "%Y-%m-%dT%H:%M:%SZ",
+            ),
+            (
+                re.compile(
+                    r"\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2} \+0000"
+                ),
+                "%d/%b/%Y:%H:%M:%S +0000",
+            ),
+            (
+                re.compile(r"[A-Za-z]{3}\s+\d{1,2} \d{2}:\d{2}:\d{2}"),
+                "%b %d %H:%M:%S",
+            ),
+        )
+        with (workdir / "server.log").open(
+            encoding="utf-8", errors="replace"
+        ) as handle:
+            for line in handle:
+                user_match = re.search(r"\buser=([^\s]+)", line)
+                if user_match is None:
+                    continue
+                parsed: datetime | None = None
+                for pattern, date_format in timestamp_patterns:
+                    timestamp_match = pattern.search(line)
+                    if timestamp_match is None:
+                        continue
+                    parsed = datetime.strptime(
+                        timestamp_match.group(0), date_format
+                    )
+                    if date_format == "%b %d %H:%M:%S":
+                        parsed = parsed.replace(year=target_year)
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                    break
+                if parsed is not None:
+                    events[user_match.group(1)].append(parsed)
+        session_days: list[tuple[str, int]] = []
+        for user, timestamps in events.items():
+            starts: set[datetime.date] = set()
+            previous: datetime | None = None
+            for timestamp in sorted(timestamps):
+                if previous is None or timestamp - previous > timedelta(minutes=30):
+                    if (
+                        timestamp.year == target_year
+                        and timestamp.month == target_month
+                    ):
+                        starts.add(timestamp.date())
+                previous = timestamp
+            session_days.append((user, len(starts)))
+        ordered = sorted(
+            session_days, key=lambda item: (-item[1], item[0])
+        )
+        if target_rank < 1 or target_rank > len(ordered):
+            raise ValueError("requested session rank is outside the user list")
+        return ordered[target_rank - 1][0], (
+            f"parsed and normalized {sum(map(len, events.values()))} log events",
+            "sorted each user's events and split sessions at gaps over 30 minutes",
+            f"ranked distinct session-start days for {month_name} {target_year}",
         )
 
     @staticmethod

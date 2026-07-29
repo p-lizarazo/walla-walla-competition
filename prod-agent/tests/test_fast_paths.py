@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import tempfile
 import unittest
@@ -156,6 +157,107 @@ The maximum reimbursement for a single claim under this section is $88,888.
                 FakeWebSession(),
             )
         self.assertEqual(result.candidate.answer, "2045.00")
+
+    def test_dirty_ledger_parses_currency_and_skips_invalid_values(self):
+        prompt = (
+            "Download transactions.csv. The amount column is messy. "
+            "Compute the total amount of all rows whose status is exactly "
+            "'returned'."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "transactions.csv").write_text(
+                "status,amount\n"
+                'returned,\"$1,200.50\"\n'
+                "returned, 25.25 USD\n"
+                "returned,not-a-number\n"
+                "cancelled,999.00\n"
+            )
+            result = self.solver.solve(
+                task(prompt, files=("transactions.csv",)),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "1225.75")
+
+    def test_event_horizon_filters_type_and_inclusive_dates(self):
+        prompt = (
+            "Download events.jsonl. Which user has the most events of type "
+            "'upload' with a UTC date from 2026-06-05 through 2026-06-21 "
+            "inclusive? There is a unique winner."
+        )
+        rows = [
+            {"user": "u1", "type": "upload", "ts": "2026-06-05T00:00:00Z"},
+            {"user": "u1", "type": "upload", "ts": "2026-06-21T23:59:59Z"},
+            {"user": "u2", "type": "upload", "ts": "2026-06-10T00:00:00Z"},
+            {"user": "u2", "type": "login", "ts": "2026-06-11T00:00:00Z"},
+            {"user": "u3", "type": "upload", "ts": "2026-06-22T00:00:00Z"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "events.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows)
+            )
+            result = self.solver.solve(
+                task(prompt, files=("events.jsonl",)),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "u1")
+
+    def test_join_the_dots_keeps_first_order_occurrence(self):
+        prompt = (
+            "Download users.csv and orders.jsonl. Keep only the FIRST "
+            "occurrence of each order_id. After deduplication, exclude orders "
+            "whose status is 'refunded'. Sum amount_cents per user and answer "
+            "with the email of the unique highest total."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "users.csv").write_text(
+                "id,email,signup\n1,a@example.com,x\n2,b@example.com,x\n"
+            )
+            orders = [
+                {"order_id": "x", "user_id": 1, "amount_cents": 500, "status": "paid"},
+                {"order_id": "x", "user_id": 2, "amount_cents": 9999, "status": "paid"},
+                {"order_id": "y", "user_id": 2, "amount_cents": 600, "status": "paid"},
+                {"order_id": "z", "user_id": 1, "amount_cents": 5000, "status": "refunded"},
+            ]
+            pathlib.Path(directory, "orders.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in orders)
+            )
+            result = self.solver.solve(
+                task(
+                    prompt,
+                    files=("orders.jsonl", "users.csv"),
+                ),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "b@example.com")
+
+    def test_session_hunter_normalizes_three_timestamp_formats(self):
+        prompt = (
+            "Download server.log. Lines use ISO, Apache, or syslog timestamps. "
+            "A gap of more than 30 minutes starts a new session. During "
+            "September 2026, which user has the 2nd-highest count?"
+        )
+        log = "\n".join(
+            (
+                "2026-09-01T00:00:00Z user=u1",
+                "01/Sep/2026:00:10:00 +0000 user=u1",
+                "Sep 02 00:00:00 user=u1",
+                "2026-09-03T00:00:00Z user=u1",
+                "Sep 01 01:00:00 user=u2",
+                "02/Sep/2026:01:00:00 +0000 user=u2",
+                "2026-09-01T02:00:00Z user=u3",
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "server.log").write_text(log)
+            result = self.solver.solve(
+                task(prompt, files=("server.log",)),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "u2")
 
     def test_encrypted_bundle_follows_note(self):
         password = b"noclaf"
