@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import threading
 
-from models import Priority, Tile
+from models import BoardSnapshot, Phase, Priority, Tile
 from orchestrator import Orchestrator
 
 
@@ -38,6 +39,21 @@ class OrchestratorTests(unittest.TestCase):
         )
 
         self.assertEqual(chosen[0][0].category, "Ship It")
+
+    def test_live_snapshot_drives_cooperative_cancellation(self) -> None:
+        orchestrator = object.__new__(Orchestrator)
+        orchestrator.config = type("Config", (), {"mode": "auto"})()
+        orchestrator._snapshot_lock = threading.Lock()
+        orchestrator._snapshot = BoardSnapshot(
+            phase=Phase.GAME,
+            tiles=(Tile("open", "Cryptic", 100),),
+            solved_ids=frozenset(),
+            server_time=None,
+            fetched_monotonic=0,
+        )
+
+        self.assertTrue(orchestrator._tile_is_open("open"))
+        self.assertFalse(orchestrator._tile_is_open("claimed"))
 
 
 if __name__ == "__main__":

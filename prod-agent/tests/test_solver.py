@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 
 from config import Config
 from models import Candidate, Evidence, TaskDetail
-from solver import AnthropicSolver, ToolExecution
+from solver import AnthropicSolver, SolveCancelled, ToolExecution
 
 
 def config() -> Config:
@@ -120,6 +121,121 @@ class SolverTests(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.answer, "42")
         self.assertEqual(candidate.tool_turns, 1)
+
+    def test_uses_point_tier_token_budget(self) -> None:
+        calls = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(content=[])
+
+        tiered_config = replace(
+            config(),
+            thinking_enabled=False,
+            max_tokens=1000,
+            max_tokens_400=2000,
+            max_tokens_500=3000,
+        )
+        solver = AnthropicSolver(
+            tiered_config,
+            Playbooks(),
+            client_factory=lambda: SimpleNamespace(
+                messages=SimpleNamespace(create=create)
+            ),
+        )
+        for points in (300, 400, 500):
+            task = TaskDetail(
+                id=f"PR-{points}",
+                category="Heavy Compute",
+                title="test",
+                points=points,
+                prompt="Compute it.",
+                files=(),
+                answer_format="numeric",
+            )
+            self.assertIsNone(
+                solver.solve(task, "/tmp/test", 0.0, Runtime())
+            )
+
+        self.assertEqual(
+            [request["max_tokens"] for request in calls],
+            [1000, 2000, 3000],
+        )
+
+    def test_cancels_before_spending_a_model_call(self) -> None:
+        client_created = False
+
+        def client_factory():
+            nonlocal client_created
+            client_created = True
+            return SimpleNamespace()
+
+        solver = AnthropicSolver(
+            config(), Playbooks(), client_factory=client_factory
+        )
+        task = TaskDetail(
+            id="PR-GONE",
+            category="Cryptic",
+            title="gone",
+            points=100,
+            prompt="Do not solve.",
+            files=(),
+            answer_format="exact",
+        )
+
+        with self.assertRaises(SolveCancelled):
+            solver.solve(
+                task,
+                "/tmp/test",
+                0.0,
+                Runtime(),
+                should_continue=lambda: False,
+            )
+
+        self.assertFalse(client_created)
+
+    def test_cancels_after_model_call_before_running_tools(self) -> None:
+        tool_use = SimpleNamespace(
+            type="tool_use",
+            name="run_python",
+            id="call-1",
+            input={"code": "print(42)"},
+        )
+        model_calls = 0
+
+        def create(**kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            return SimpleNamespace(content=[tool_use])
+
+        checks = iter((True, True, False))
+        solver = AnthropicSolver(
+            config(),
+            Playbooks(),
+            client_factory=lambda: SimpleNamespace(
+                messages=SimpleNamespace(create=create)
+            ),
+        )
+        task = TaskDetail(
+            id="PR-RACED",
+            category="Heavy Compute",
+            title="raced",
+            points=500,
+            prompt="Compute it.",
+            files=(),
+            answer_format="numeric",
+        )
+
+        with self.assertRaises(SolveCancelled):
+            solver.solve(
+                task,
+                "/tmp/test",
+                0.0,
+                Runtime(),
+                should_continue=lambda: next(checks),
+            )
+
+        self.assertEqual(model_calls, 1)
 
 
 if __name__ == "__main__":

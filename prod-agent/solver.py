@@ -17,6 +17,10 @@ class ToolExecution:
     is_error: bool = False
 
 
+class SolveCancelled(RuntimeError):
+    """Raised when a live board refresh shows that the tile is gone."""
+
+
 class ToolRuntime(Protocol):
     @property
     def candidate(self) -> Candidate | None: ...
@@ -241,18 +245,29 @@ answer_file instead of retyping it."""
         workdir: str,
         temperature: float,
         runtime: ToolRuntime,
+        should_continue: Callable[[], bool] | None = None,
     ) -> Candidate | None:
+        def ensure_active() -> None:
+            if should_continue is not None and not should_continue():
+                raise SolveCancelled(
+                    f"{task.id} is no longer open on the live board"
+                )
+
+        ensure_active()
         client = self._client()
         thinking_budget = self.config.thinking_budget(task.points)
         inference_temperature = 1.0 if thinking_budget is not None else temperature
+        max_turns = self.config.solve_turns(task.points)
+        max_tokens = self.config.solve_tokens(task.points)
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": "Solve this tile now with tools."}
         ]
         started = time.monotonic()
-        for turn in range(self.config.max_turns):
+        for turn in range(max_turns):
+            ensure_active()
             request: dict[str, Any] = dict(
                 model=self.config.model,
-                max_tokens=self.config.max_tokens,
+                max_tokens=max_tokens,
                 temperature=inference_temperature,
                 system=self._system_prompt(
                     task, inference_temperature, workdir
@@ -266,6 +281,7 @@ answer_file instead of retyping it."""
                     "budget_tokens": thinking_budget,
                 }
             response = client.messages.create(**request)
+            ensure_active()
             messages.append({"role": "assistant", "content": response.content})
             calls = [
                 block for block in response.content if block.type == "tool_use"
@@ -274,7 +290,9 @@ answer_file instead of retyping it."""
                 return runtime.candidate
             results: list[dict[str, Any]] = []
             for call in calls:
+                ensure_active()
                 execution = runtime.execute(call.name, dict(call.input))
+                ensure_active()
                 result: dict[str, Any] = {
                     "type": "tool_result",
                     "tool_use_id": call.id,

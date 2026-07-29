@@ -61,35 +61,42 @@ defaults to the team key. Useful controls from `Config.from_env()`:
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `AGENT_MODE` | `scored` | `scored` or `practice_eval` |
-| `WORKERS` | `4` | Concurrent solver workers |
-| `VERIFIER_WORKERS` | `1` | Independent verifier capacity |
-| `CPU_WORKERS` | `1` | Bounded local compute capacity |
-| `MAX_TURNS` | `20` | Model/tool turns per attempt |
-| `MAX_TOKENS` | `4096` | Event proxy output ceiling |
-| `THINKING_ENABLED` | `1` | Enable Haiku 4.5 extended thinking on high tiers |
+| `AGENT_MODE` | `auto` | `auto`, `scored`, or `practice_eval` |
+| `WORKERS` | `6` | Concurrent solver workers |
+| `VERIFIER_WORKERS` | `1` | Independent verifier capacity for uncertain 400/500s |
+| `CPU_WORKERS` | `2` | Bounded concurrent local-compute capacity |
+| `MAX_TURNS` | `6` | Model/tool turns for 100–300-point attempts |
+| `MAX_TURNS_400` | `10` | Model/tool turns for 400-point attempts |
+| `MAX_TURNS_500` | `12` | Model/tool turns for 500-point attempts |
+| `MAX_TOKENS` | `1536` | Output ceiling for 100–300-point attempts |
+| `MAX_TOKENS_400` | `3072` | Output ceiling for 400-point attempts |
+| `MAX_TOKENS_500` | `4096` | Output ceiling for 500-point attempts |
+| `THINKING_ENABLED` | `0` | Enable Haiku 4.5 extended thinking on high tiers |
 | `THINKING_MIN_POINTS` | `400` | Lowest tier that receives thinking |
 | `THINKING_BUDGET_400` | `1024` | 400-point thinking budget |
-| `THINKING_BUDGET_500` | `2048` | 500-point thinking budget |
-| `MAX_TOOL_OUTPUT` | `12000` | Tool output admitted to model context |
+| `THINKING_BUDGET_500` | `1536` | 500-point thinking budget |
+| `MAX_TOOL_OUTPUT` | `6000` | Tool output admitted to model context |
 | `PYTHON_TIMEOUT_SECONDS` | `60` | Local computation timeout |
-| `PYTHON_MEMORY_MB` | `512` | Local computation memory budget |
-| `BOARD_POLL_SECONDS` | `3.0` | Board refresh cadence |
+| `PYTHON_MEMORY_MB` | `1024` | Local computation memory budget |
+| `BOARD_POLL_SECONDS` | `1.5` | Board refresh and cancellation cadence |
 | `SUBMISSION_INTERVAL_SECONDS` | `3.1` | Global submission spacing |
 | `STRONG_CONFIDENCE_THRESHOLD` | `0.90` | Normal submit threshold |
 | `URGENT_CONFIDENCE_FLOOR` | `0.80` | Lowest allowed urgent threshold |
-| `TEMPERATURES` | `0.0,0.25,0.5` | Worker inference temperatures |
+| `TEMPERATURES` | `0.0,0.15,0.3` | Worker inference temperatures |
 | `PLAYBOOKS_PATH` | `playbooks.json` | Generic method catalog |
 
 Keep secrets in injected environment variables, never in `.env` files shipped
 with the agent. Tune concurrency against the shared model rate and the
 container's two-CPU/two-GB limits.
 
-Parallelism is width-first: four solver workers attack different tiles, while
+Parallelism is width-first: six solver workers attack different tiles, while
 one verifier worker is reserved for a second Haiku pass at another temperature
-when a high-value candidate misses the confidence gate. Only one CPU-heavy
-Python subprocess runs at a time. This captures tiles quickly without wasting
-all model capacity by duplicating every solve.
+when an uncertain 400/500 misses the confidence gate. Two local Python slots
+allow useful compute overlap without letting subprocesses consume the whole
+container. A 1.5-second board refresh cooperatively cancels queued work and
+running solvers between model/tool calls when another team claims their tile.
+Lower tiers use small model budgets for throughput; 400s and 500s receive
+progressively larger turn and token ceilings.
 
 ## Lightweight practice results
 

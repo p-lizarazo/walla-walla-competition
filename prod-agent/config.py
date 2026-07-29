@@ -59,6 +59,10 @@ class Config:
     practice_results_path: str
     task_filter: tuple[str, ...]
     experiment_id: str
+    max_turns_400: int = 10
+    max_turns_500: int = 12
+    max_tokens_400: int = 3072
+    max_tokens_500: int = 4096
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -87,14 +91,14 @@ class Config:
             model="claude-haiku-4-5",
             mode=mode,
             workers=_int("WORKERS", 6),
-            verifier_workers=_int("VERIFIER_WORKERS", 0, minimum=0),
-            cpu_workers=_int("CPU_WORKERS", 1),
-            max_turns=_int("MAX_TURNS", 8),
-            max_tokens=_int("MAX_TOKENS", 2048),
+            verifier_workers=_int("VERIFIER_WORKERS", 1, minimum=0),
+            cpu_workers=_int("CPU_WORKERS", 2),
+            max_turns=_int("MAX_TURNS", 6),
+            max_tokens=_int("MAX_TOKENS", 1536),
             max_tool_output=_int("MAX_TOOL_OUTPUT", 6_000),
             python_timeout_seconds=_int("PYTHON_TIMEOUT_SECONDS", 60),
             python_memory_mb=_int("PYTHON_MEMORY_MB", 1024),
-            board_poll_seconds=_float("BOARD_POLL_SECONDS", 3.0, minimum=0.5),
+            board_poll_seconds=_float("BOARD_POLL_SECONDS", 1.5, minimum=0.5),
             run_duration_seconds=_float(
                 "RUN_DURATION_SECONDS", 0.0, minimum=0.0
             ),
@@ -118,7 +122,25 @@ class Config:
                 if task_id.strip()
             ),
             experiment_id=os.environ.get("EXPERIMENT_ID", "default"),
+            max_turns_400=_int("MAX_TURNS_400", 10),
+            max_turns_500=_int("MAX_TURNS_500", 12),
+            max_tokens_400=_int("MAX_TOKENS_400", 3072),
+            max_tokens_500=_int("MAX_TOKENS_500", 4096),
         )
+
+    def solve_turns(self, points: int) -> int:
+        if points >= 500:
+            return self.max_turns_500
+        if points >= 400:
+            return self.max_turns_400
+        return self.max_turns
+
+    def solve_tokens(self, points: int) -> int:
+        if points >= 500:
+            return self.max_tokens_500
+        if points >= 400:
+            return self.max_tokens_400
+        return self.max_tokens
 
     def thinking_budget(self, points: int) -> int | None:
         if not self.thinking_enabled or points < self.thinking_min_points:
@@ -128,7 +150,7 @@ class Config:
             if points >= 500
             else self.thinking_budget_400
         )
-        if budget < 1024 or budget >= self.max_tokens:
+        if budget < 1024 or budget >= self.solve_tokens(points):
             raise ValueError(
                 "thinking budget must be at least 1024 and below MAX_TOKENS"
             )

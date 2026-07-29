@@ -31,7 +31,7 @@ from playbooks import PlaybookLoader
 from practice_log import PracticeAttemptLog
 from runtime import ProductionToolRuntime
 from scheduler import Scheduler
-from solver import AnthropicSolver
+from solver import AnthropicSolver, SolveCancelled
 from submission import SubmissionLane
 from tools import WebSessionPool
 
@@ -93,6 +93,15 @@ class Orchestrator:
     def _get_snapshot(self) -> BoardSnapshot | None:
         with self._snapshot_lock:
             return self._snapshot
+
+    def _tile_is_open(self, task_id: str) -> bool:
+        """Cheap cooperative-cancellation check against the latest board."""
+        snapshot = self._get_snapshot()
+        if snapshot is None:
+            return True
+        return self._playable(snapshot) and any(
+            tile.id == task_id for tile in snapshot.tiles
+        )
 
     def _fresh_board(self, task_id: str | None = None) -> BoardSnapshot:
         snapshot = self.client.board()
@@ -156,8 +165,16 @@ class Orchestrator:
 
     def _solve(self, job: SolveJob) -> SolveOutcome:
         try:
+            if not self._tile_is_open(job.tile.id):
+                raise SolveCancelled(
+                    f"{job.tile.id} disappeared before task fetch"
+                )
             task = self.client.task(job.tile.id)
             workdir = self.client.fetch_files(task)
+            if not self._tile_is_open(job.tile.id):
+                raise SolveCancelled(
+                    f"{job.tile.id} disappeared during file fetch"
+                )
             for name in ("answer.txt", "candidate.json"):
                 (workdir / name).unlink(missing_ok=True)
             candidate = self.solver.solve(
@@ -165,8 +182,11 @@ class Orchestrator:
                 str(workdir),
                 job.temperature,
                 self._runtime(task, workdir, job.temperature),
+                should_continue=lambda: self._tile_is_open(job.tile.id),
             )
             return SolveOutcome(job, task, candidate)
+        except SolveCancelled as error:
+            return SolveOutcome(job, None, None, f"cancelled: {error}")
         except TileUnavailable as error:
             return SolveOutcome(job, None, None, f"unavailable: {error}")
         except Exception as error:
@@ -199,11 +219,21 @@ class Orchestrator:
                         alternate,
                         WebSessionPool(self.config.base_url),
                     ),
+                    should_continue=lambda: self._tile_is_open(
+                        primary.task.id
+                    ),
                 )
             return SolveOutcome(
                 replace(primary.job, temperature=alternate),
                 primary.task,
                 candidate,
+            )
+        except SolveCancelled as error:
+            return SolveOutcome(
+                primary.job,
+                primary.task,
+                None,
+                f"cancelled: {error}",
             )
         except Exception as error:
             return SolveOutcome(
@@ -344,8 +374,8 @@ class Orchestrator:
                 outcome.job.tile.points
             ),
             workers=self.config.workers,
-            max_turns=self.config.max_turns,
-            max_tokens=self.config.max_tokens,
+            max_turns=self.config.solve_turns(outcome.job.tile.points),
+            max_tokens=self.config.solve_tokens(outcome.job.tile.points),
             max_tool_output=self.config.max_tool_output,
             elapsed_seconds=(
                 candidate.elapsed_seconds if candidate is not None else None
@@ -407,6 +437,15 @@ class Orchestrator:
     ) -> None:
         task_id = outcome.job.tile.id
         if outcome.error:
+            if outcome.error.startswith("cancelled:"):
+                self.log(f"{task_id}: solve cancelled; tile no longer open")
+                self._record_practice(
+                    outcome,
+                    result="cancelled",
+                    failure_stage="race",
+                    error_type="SolveCancelled",
+                )
+                return
             self.log(f"{task_id}: solve failed: {outcome.error}")
             self._record_practice(
                 outcome,
@@ -540,6 +579,33 @@ class Orchestrator:
                     if snapshot.phase is Phase.ENDED:
                         return
                     if self._playable(snapshot):
+                        open_ids = {tile.id for tile in snapshot.tiles}
+                        for future, job in list(active.items()):
+                            if (
+                                job.tile.id not in open_ids
+                                and future.cancel()
+                            ):
+                                active.pop(future)
+                                self.log(
+                                    f"{job.tile.id}: queued solve cancelled; "
+                                    "tile no longer open"
+                                )
+                        for future, job in list(verifiers.items()):
+                            task_id = job.outcome.job.tile.id
+                            if task_id not in open_ids and future.cancel():
+                                verifiers.pop(future)
+                                self.log(
+                                    f"{task_id}: queued verifier cancelled; "
+                                    "tile no longer open"
+                                )
+                        for future, item in list(submissions.items()):
+                            task_id = item[0].job.tile.id
+                            if task_id not in open_ids and future.cancel():
+                                submissions.pop(future)
+                                self.log(
+                                    f"{task_id}: queued submission cancelled; "
+                                    "tile no longer open"
+                                )
                         reserved = {
                             job.tile.id for job in active.values()
                         } | {
@@ -581,6 +647,8 @@ class Orchestrator:
                                 f"{tile.id}: scheduled points={tile.points} "
                                 f"priority={priority.score:.3f} "
                                 f"temp={job.temperature} "
+                                f"turns={self.config.solve_turns(tile.points)} "
+                                f"tokens={self.config.solve_tokens(tile.points)} "
                                 f"thinking={self.config.thinking_budget(tile.points)}"
                             )
 
