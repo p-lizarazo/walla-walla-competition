@@ -19,6 +19,7 @@ agent.zip
 # Runtime evaluation data
 **/learnings.jsonl
 **/practice_results.jsonl
+**/benchmark-data/
 
 # macOS metadata
 .DS_Store
