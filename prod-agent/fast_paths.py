@@ -73,6 +73,9 @@ class FastPathSolver:
     def _handlers(self):
         return (
             self._policy_section,
+            self._two_hops,
+            self._minute_details,
+            self._living_document,
             self._leaderboard,
             self._recurrence_sum,
             self._infeasible_hash_work,
@@ -175,6 +178,243 @@ class FastPathSolver:
             f"isolated Section {section} by heading boundaries",
             "found exactly one reimbursement limit in the target section",
             "removed currency punctuation without changing the numeric value",
+        )
+
+    @staticmethod
+    def _two_hops(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        clause_match = re.search(
+            r"Clause\s+(\d+\.\d+)\s+defines the monthly service fee",
+            task.prompt,
+            re.IGNORECASE,
+        )
+        if not clause_match or "contract.txt" not in task.files:
+            return False
+        if workdir is None:
+            return True
+        text = (workdir / "contract.txt").read_text(
+            encoding="utf-8", errors="replace"
+        )
+
+        def clause(number: str) -> str:
+            match = re.search(
+                rf"(?ms)^Clause\s+{re.escape(number)}\s+-.*?"
+                rf"(?=^Clause\s+\d+\.\d+\s+-|^Appendix\s+[A-Z]\b|\Z)",
+                text,
+            )
+            if match is None:
+                raise ValueError(f"Clause {number} was not found")
+            return match.group(0)
+
+        fee_clause = clause(clause_match.group(1))
+        formula = re.search(
+            r"base rate listed in Appendix\s+([A-Z]).*?tier\s+"
+            r"([A-Za-z]+)\s+customers.*?multiplied by the adjustment "
+            r"multiplier set forth in\s+Clause\s+(\d+\.\d+)",
+            fee_clause,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if formula is None:
+            raise ValueError("monthly fee formula is unfamiliar")
+        appendix_letter, tier, multiplier_clause = formula.groups()
+        appendix = re.search(
+            rf"(?ms)^Appendix\s+{appendix_letter}\b.*?"
+            rf"(?=^Appendix\s+[A-Z]\b|\Z)",
+            text,
+        )
+        if appendix is None:
+            raise ValueError(f"Appendix {appendix_letter} was not found")
+        rate_match = re.search(
+            rf"Tier\s+{re.escape(tier)}:\s*\$\s*([\d,]+(?:\.\d+)?)",
+            appendix.group(0),
+            re.IGNORECASE,
+        )
+        multiplier_match = re.search(
+            r"adjustment multiplier.*?(\d+(?:\.\d+)?)",
+            clause(multiplier_clause),
+            re.IGNORECASE | re.DOTALL,
+        )
+        if rate_match is None or multiplier_match is None:
+            raise ValueError("fee rate or multiplier was not found")
+        rate = Decimal(rate_match.group(1).replace(",", ""))
+        multiplier = Decimal(multiplier_match.group(1))
+        answer = format(
+            (rate * multiplier).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            ),
+            "f",
+        )
+        return answer, (
+            f"isolated fee formula in Clause {clause_match.group(1)}",
+            f"resolved tier {tier} in Appendix {appendix_letter}",
+            f"resolved multiplier in Clause {multiplier_clause} and multiplied exactly",
+        )
+
+    @staticmethod
+    def _minute_details(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        match = re.search(
+            r"assigned to ([A-Za-z]+) during ([A-Za-z]+) (\d{4})",
+            task.prompt,
+            re.IGNORECASE,
+        )
+        if not match or not any(
+            name.startswith("notes_") and name.endswith(".md")
+            for name in task.files
+        ):
+            return False
+        if workdir is None:
+            return True
+        person, month_name, year_text = match.groups()
+        month = datetime.strptime(month_name, "%B").month
+        filename = f"notes_{int(year_text):04d}-{month:02d}.md"
+        if filename not in task.files:
+            raise ValueError(f"expected notes file is missing: {filename}")
+        text = (workdir / filename).read_text(
+            encoding="utf-8", errors="replace"
+        )
+        tickets = set(
+            re.findall(
+                rf"(?im)^\s*-\s*{re.escape(person)}\s*:.*?"
+                r"\b([A-Z]{2}-\d{4})\b",
+                text,
+            )
+        )
+        if len(tickets) != 1:
+            raise ValueError(
+                "target month did not contain exactly one matching ticket"
+            )
+        answer = next(iter(tickets))
+        return answer, (
+            f"selected only {filename} from the twelve monthly files",
+            f"matched action-item assignee {person!r} exactly",
+            "found exactly one ticket with the required XX-1234 format",
+        )
+
+    @staticmethod
+    def _living_document(
+        task: TaskDetail,
+        workdir: pathlib.Path | None,
+        web: EventWebSession | None,
+    ) -> tuple[str, tuple[str, ...]] | bool:
+        match = re.search(
+            r"limit.*?for Clause\s+(\d+\.\d+)\s+on\s+(\d{4}-\d{2}-\d{2})",
+            task.prompt,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if (
+            not match
+            or "regulation.txt" not in task.files
+            or "AMENDMENTS" not in task.prompt
+            or "revoke" not in task.prompt.lower()
+        ):
+            return False
+        if workdir is None:
+            return True
+        clause_number, query_date_text = match.groups()
+        query_date = datetime.strptime(query_date_text, "%Y-%m-%d").date()
+        text = (workdir / "regulation.txt").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        original_block = re.search(
+            rf"(?ms)^Clause\s+{re.escape(clause_number)}\b.*?"
+            rf"(?=^Clause\s+\d+\.\d+\b|^AMENDMENTS\b|\Z)",
+            text,
+        )
+        if original_block is None:
+            raise ValueError(f"Clause {clause_number} was not found")
+        original_limit = re.search(
+            r"limit of\s*\$\s*([\d,]+)",
+            original_block.group(0),
+            re.IGNORECASE,
+        )
+        if original_limit is None:
+            raise ValueError("original clause limit was not found")
+        amendments_text = text.split("AMENDMENTS", 1)
+        if len(amendments_text) != 2:
+            raise ValueError("AMENDMENTS section was not found")
+        amendments: dict[int, dict[str, object]] = {}
+        pattern = re.compile(
+            r"(?ms)^\s*Amendment\s+(\d+)\s+"
+            r"\(published\s+(\d{4}-\d{2}-\d{2});\s*"
+            r"effective\s+(\d{4}-\d{2}-\d{2})\):\s*"
+            r"(.*?)(?=^\s*Amendment\s+\d+\s+\(|\Z)"
+        )
+        for amendment_match in pattern.finditer(amendments_text[1]):
+            number = int(amendment_match.group(1))
+            action = amendment_match.group(4).strip()
+            revoke_match = re.search(
+                r"Amendment\s+(\d+)\s+is\s+hereby\s+revoked",
+                action,
+                re.IGNORECASE,
+            )
+            limit_match = re.search(
+                rf"Clause\s+{re.escape(clause_number)}\s+is\s+amended.*?"
+                r"limit(?:\s+of|\s+is)\s*\$\s*([\d,]+)",
+                action,
+                re.IGNORECASE | re.DOTALL,
+            )
+            amendments[number] = {
+                "effective": datetime.strptime(
+                    amendment_match.group(3), "%Y-%m-%d"
+                ).date(),
+                "revokes": (
+                    int(revoke_match.group(1))
+                    if revoke_match is not None
+                    else None
+                ),
+                "limit": (
+                    limit_match.group(1).replace(",", "")
+                    if limit_match is not None
+                    else None
+                ),
+            }
+        revokers: dict[int, list[int]] = defaultdict(list)
+        for number, amendment in amendments.items():
+            revoked = amendment["revokes"]
+            if isinstance(revoked, int):
+                revokers[revoked].append(number)
+
+        memo: dict[int, bool] = {}
+
+        def active(number: int, visiting: frozenset[int] = frozenset()) -> bool:
+            if number in memo:
+                return memo[number]
+            if number in visiting:
+                raise ValueError("cyclic amendment revocations are ambiguous")
+            value = not any(
+                active(revoker, visiting | {number})
+                for revoker in revokers.get(number, ())
+            )
+            memo[number] = value
+            return value
+
+        candidates = [
+            (
+                amendment["effective"],
+                int(number),
+                str(amendment["limit"]),
+            )
+            for number, amendment in amendments.items()
+            if amendment["limit"] is not None
+            and amendment["effective"] <= query_date
+            and active(number)
+        ]
+        answer = (
+            max(candidates)[2]
+            if candidates
+            else original_limit.group(1).replace(",", "")
+        )
+        return answer, (
+            f"parsed original Clause {clause_number} and every amendment record",
+            "resolved amendment revocations recursively, independent of filing order",
+            f"selected the latest active effective date on or before {query_date_text}",
         )
 
     @staticmethod

@@ -87,6 +87,83 @@ The maximum reimbursement for a single claim under this section is $88,888.
             )
         self.assertEqual(result.candidate.answer, "4250")
 
+    def test_two_hops_resolves_appendix_rate_and_clause_multiplier(self):
+        prompt = (
+            "Download contract.txt. Clause 14.2 defines the monthly service "
+            "fee. Compute the fee in dollars; it requires cross-referencing "
+            "an appendix and another clause."
+        )
+        text = """
+Clause 3.1 - Adjustment
+The adjustment multiplier applicable to fee computations is 2.50.
+Clause 14.2 - Fee
+The monthly service fee shall equal the base rate listed in Appendix G for
+tier Bronze customers, multiplied by the adjustment multiplier set forth in
+Clause 3.1.
+Appendix G - Rates
+Tier Silver: $900.00 per month
+Tier Bronze: $1,234.56 per month
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "contract.txt").write_text(text)
+            result = self.solver.solve(
+                task(prompt, files=("contract.txt",)),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "3086.40")
+
+    def test_minute_details_selects_requested_month_and_assignee(self):
+        prompt = (
+            "Download twelve notes files. Exactly one action item was assigned "
+            "to Ingrid during May 2026; it references a ticket code."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            files = []
+            for month in range(1, 13):
+                name = f"notes_2026-{month:02d}.md"
+                files.append(name)
+                content = (
+                    "- Ingrid: unrelated work (ticket XX-9999)\n"
+                    if month == 4
+                    else "- Other: routine work (ticket AA-1000)\n"
+                )
+                if month == 5:
+                    content += "- Ingrid: instrument cache (ticket ZH-4219)\n"
+                pathlib.Path(directory, name).write_text(content)
+            result = self.solver.solve(
+                task(prompt, files=tuple(files)),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "ZH-4219")
+
+    def test_living_document_ignores_revoked_amendment(self):
+        prompt = (
+            "Download regulation.txt. The AMENDMENTS section lists every "
+            "amendment. A revoked amendment is void. What limit was in force "
+            "for Clause 5.3 on 2025-01-14?"
+        )
+        text = """
+Clause 5.3 - Transfers
+Transfers under this clause are subject to a limit of $10,000.
+AMENDMENTS
+Amendment 1 (published 2024-01-01; effective 2024-02-01): Clause 5.3 is
+amended to read: "Transfers are subject to a limit of $20,000."
+Amendment 2 (published 2024-02-01; effective 2024-03-01): Clause 5.3 is
+amended to read: "Transfers are subject to a limit of $30,000."
+Amendment 3 (published 2025-02-01; effective 2025-03-01): Amendment 2 is
+hereby revoked.
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "regulation.txt").write_text(text)
+            result = self.solver.solve(
+                task(prompt, files=("regulation.txt",)),
+                pathlib.Path(directory),
+                FakeWebSession(),
+            )
+        self.assertEqual(result.candidate.answer, "20000")
+
     def test_leaderboard_applies_documented_tie_break(self):
         prompt = (
             "Per the spec, what should "
