@@ -16,6 +16,7 @@ from typing import Any
 
 from confidence import ConfidenceEngine
 from config import Config
+from fast_paths import FastPathSolver
 from game_client import GameClient, TileUnavailable
 from models import (
     BoardSnapshot,
@@ -65,9 +66,16 @@ class Orchestrator:
         self.scheduler = Scheduler(mode=config.mode)
         self.playbooks = PlaybookLoader(config.playbooks_path)
         self.solver = AnthropicSolver(config, self.playbooks)
+        self.fast_paths = FastPathSolver()
         self.confidence = ConfidenceEngine(config)
         self.practice_log = PracticeAttemptLog(config.practice_results_path)
-        self.web_sessions = WebSessionPool(config.base_url)
+        self.web_sessions = WebSessionPool(
+            config.base_url,
+            timeout_seconds=config.model_timeout_seconds,
+        )
+        self._fallback_slots = threading.BoundedSemaphore(
+            config.fallback_workers
+        )
         self._snapshot_lock = threading.Lock()
         self._snapshot: BoardSnapshot | None = None
         self._dashboard_lock = threading.Lock()
@@ -81,6 +89,14 @@ class Orchestrator:
         self._practice_attempted: set[str] = set()
         self._priority_by_task: dict[str, Priority] = {}
         self._scheduled_at = 0
+        self._work_state_lock = threading.Lock()
+        self._work_states: dict[str, str] = {}
+        self._deferred_until: dict[str, float] = {}
+        self._transient_failures: dict[str, int] = {}
+        self._submission_failures: dict[str, int] = {}
+        self._pending_submissions: list[
+            tuple[SolveOutcome, ConfidenceDecision]
+        ] = []
 
     @staticmethod
     def log(message: str) -> None:
@@ -119,6 +135,8 @@ class Orchestrator:
         tile = next((tile for tile in snapshot.tiles if tile.id == task_id), None)
         attempt = self._submission.state(task_id)
         priority = self._priority_by_task.get(task_id)
+        with self._work_state_lock:
+            work_state = self._work_states.get(task_id)
         return {
             "task_id": task_id,
             "phase": snapshot.phase.value,
@@ -135,7 +153,16 @@ class Orchestrator:
                 0.0, round(attempt.cooldown_until - time.monotonic(), 3)
             ),
             "priority": round(priority.score, 5) if priority else None,
+            "working_on": work_state is not None,
+            "work_state": work_state,
         }
+
+    def _set_work_state(self, task_id: str, state: str | None) -> None:
+        with self._work_state_lock:
+            if state is None:
+                self._work_states.pop(task_id, None)
+            else:
+                self._work_states[task_id] = state
 
     def _runtime(
         self,
@@ -155,17 +182,47 @@ class Orchestrator:
         )
 
     def _solve(self, job: SolveJob) -> SolveOutcome:
+        started = time.monotonic()
         try:
             task = self.client.task(job.tile.id)
             workdir = self.client.fetch_files(task)
             for name in ("answer.txt", "candidate.json"):
                 (workdir / name).unlink(missing_ok=True)
-            candidate = self.solver.solve(
+            fast = self.fast_paths.solve(
                 task,
-                str(workdir),
-                job.temperature,
-                self._runtime(task, workdir, job.temperature),
+                workdir,
+                self.web_sessions.for_task(task.id),
             )
+            if fast.candidate is not None:
+                self.log(
+                    f"{task.id}: deterministic fast path completed in "
+                    f"{fast.candidate.elapsed_seconds:.3f}s"
+                )
+                return SolveOutcome(job, task, fast.candidate)
+            if fast.error:
+                self.log(
+                    f"{task.id}: deterministic fast path failed: {fast.error}; "
+                    "falling back to Haiku"
+                )
+            if not self._fallback_slots.acquire(blocking=False):
+                return SolveOutcome(
+                    job, task, None, "deferred: fallback lane busy"
+                )
+            try:
+                runtime = self._runtime(task, workdir, job.temperature)
+                candidate = self.solver.solve(
+                    task,
+                    str(workdir),
+                    job.temperature,
+                    runtime,
+                    should_continue=lambda: (
+                        time.monotonic() - started
+                        < self._fallback_deadline(job.tile)
+                        and bool(self._problem_status(task.id).get("open"))
+                    ),
+                )
+            finally:
+                self._fallback_slots.release()
             return SolveOutcome(job, task, candidate)
         except TileUnavailable as error:
             return SolveOutcome(job, None, None, f"unavailable: {error}")
@@ -253,6 +310,34 @@ class Orchestrator:
             return 1
         return 2 if tile.points >= 400 else 1
 
+    def _fallback_deadline(self, tile: Tile) -> float:
+        tier_limit = {
+            100: 12.0,
+            200: 12.0,
+            300: 18.0,
+            400: 25.0,
+            500: 30.0,
+        }.get(tile.points, self.config.fallback_deadline_seconds)
+        return min(self.config.fallback_deadline_seconds, tier_limit)
+
+    def _retry_transient(self, task_id: str) -> bool:
+        snapshot = self._get_snapshot()
+        if (
+            snapshot is None
+            or task_id not in {tile.id for tile in snapshot.tiles}
+        ):
+            return False
+        failures = self._transient_failures.get(task_id, 0) + 1
+        self._transient_failures[task_id] = failures
+        if failures > 1:
+            return False
+        self._solve_counts[task_id] = max(
+            0, self._solve_counts.get(task_id, 1) - 1
+        )
+        self._deferred_until[task_id] = time.monotonic() + 2.0
+        self._practice_attempted.discard(task_id)
+        return True
+
     def _rank_available(
         self,
         snapshot: BoardSnapshot,
@@ -265,6 +350,7 @@ class Orchestrator:
         }
         tile_by_id = {tile.id: tile for tile in snapshot.tiles}
         ranked = []
+        now = time.monotonic()
         for priority in priorities:
             tile = tile_by_id[priority.task_id]
             if (
@@ -280,6 +366,8 @@ class Orchestrator:
             ):
                 continue
             if self._solve_counts.get(tile.id, 0) >= self._max_solves(tile):
+                continue
+            if self._deferred_until.get(tile.id, 0.0) > now:
                 continue
             ranked.append((tile, priority))
         return ranked
@@ -363,7 +451,7 @@ class Orchestrator:
         self,
         outcome: SolveOutcome,
         decision: ConfidenceDecision,
-    ) -> None:
+    ) -> dict[str, Any]:
         assert outcome.candidate is not None
         lane_decision = None if self._evaluation_active() else decision
         payload = self._submission.try_submit(outcome.candidate, lane_decision)
@@ -371,17 +459,58 @@ class Orchestrator:
         self.log(
             f"{outcome.job.tile.id}: confidence={decision.probability:.3f} "
             f"submitted={payload.get('submitted', True)} result={result}"
+            + (
+                f" reason={payload.get('reason')}"
+                if payload.get("reason")
+                else ""
+            )
         )
         self._record_practice(
             outcome,
             decision=decision,
-            submitted=result not in {"rejected", "unknown"},
+            submitted=result not in {"rejected", "unknown", "rate_limited"},
             result=result,
             failure_stage=(
                 "submission" if result in {"rejected", "unknown"} else None
             ),
             error_type=payload.get("rejection"),
         )
+        return payload
+
+    @staticmethod
+    def _submission_priority(
+        item: tuple[SolveOutcome, ConfidenceDecision],
+    ) -> tuple[float, int, float]:
+        outcome, _ = item
+        priority = outcome.job.priority
+        claim_hazard = 1.0 - priority.race_survival
+        return (
+            priority.net_value * (1.0 + claim_hazard),
+            outcome.job.tile.points,
+            priority.score,
+        )
+
+    def _dispatch_next_submission(
+        self,
+        submission_pool: ThreadPoolExecutor,
+        submissions: dict[
+            Future[dict[str, Any]],
+            tuple[SolveOutcome, ConfidenceDecision],
+        ],
+    ) -> None:
+        if submissions or not self._pending_submissions:
+            return
+        item = max(
+            self._pending_submissions,
+            key=self._submission_priority,
+        )
+        self._pending_submissions.remove(item)
+        outcome, decision = item
+        self._set_work_state(
+            outcome.job.tile.id, "submission_in_flight"
+        )
+        future = submission_pool.submit(self._submit, outcome, decision)
+        submissions[future] = item
 
     def _queue_submit(
         self,
@@ -389,11 +518,13 @@ class Orchestrator:
         decision: ConfidenceDecision,
         submission_pool: ThreadPoolExecutor,
         submissions: dict[
-            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+            Future[dict[str, Any]],
+            tuple[SolveOutcome, ConfidenceDecision],
         ],
     ) -> None:
-        future = submission_pool.submit(self._submit, outcome, decision)
-        submissions[future] = (outcome, decision)
+        self._set_work_state(outcome.job.tile.id, "submission_pending")
+        self._pending_submissions.append((outcome, decision))
+        self._dispatch_next_submission(submission_pool, submissions)
 
     def _handle_solve(
         self,
@@ -402,11 +533,46 @@ class Orchestrator:
         verifiers: dict[Future[SolveOutcome], VerifyJob],
         submission_pool: ThreadPoolExecutor,
         submissions: dict[
-            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+            Future[dict[str, Any]],
+            tuple[SolveOutcome, ConfidenceDecision],
         ],
     ) -> None:
         task_id = outcome.job.tile.id
+        if outcome.error == "deferred: fallback lane busy":
+            self._solve_counts[task_id] = max(
+                0, self._solve_counts.get(task_id, 1) - 1
+            )
+            self._deferred_until[task_id] = time.monotonic() + 2.0
+            self._practice_attempted.discard(task_id)
+            self.log(
+                f"{task_id}: deferred; deterministic path unavailable and "
+                "the single Haiku fallback lane is busy"
+            )
+            self._set_work_state(task_id, None)
+            return
+        snapshot = self._get_snapshot()
+        if (
+            snapshot is not None
+            and task_id not in {tile.id for tile in snapshot.tiles}
+            and not self._evaluation_active()
+        ):
+            self.log(
+                f"{task_id}: abandoned before submission; tile was claimed "
+                "while solving"
+            )
+            self._set_work_state(task_id, None)
+            return
         if outcome.error:
+            if (
+                not outcome.error.startswith("unavailable:")
+                and self._retry_transient(task_id)
+            ):
+                self.log(
+                    f"{task_id}: transient solve failure; one bounded retry "
+                    f"scheduled ({outcome.error})"
+                )
+                self._set_work_state(task_id, None)
+                return
             self.log(f"{task_id}: solve failed: {outcome.error}")
             self._record_practice(
                 outcome,
@@ -414,12 +580,21 @@ class Orchestrator:
                 failure_stage="solve",
                 error_type=outcome.error.split(":", 1)[0],
             )
+            self._set_work_state(task_id, None)
             return
         if outcome.candidate is None:
+            if self._retry_transient(task_id):
+                self.log(
+                    f"{task_id}: deadline/no-candidate; one bounded retry "
+                    "scheduled"
+                )
+                self._set_work_state(task_id, None)
+                return
             self.log(f"{task_id}: no verified candidate")
             self._record_practice(
                 outcome, result="unverified", failure_stage="candidate"
             )
+            self._set_work_state(task_id, None)
             return
         urgency = max(0.0, 1.0 - outcome.job.priority.race_survival)
         decision = self.confidence.assess(
@@ -443,6 +618,7 @@ class Orchestrator:
             verify_job = VerifyJob(outcome, decision)
             future = verifier_pool.submit(self._verify, verify_job)
             verifiers[future] = verify_job
+            self._set_work_state(task_id, "verifying")
             self.log(
                 f"{task_id}: confidence={decision.probability:.3f}; "
                 "independent verifier started"
@@ -452,6 +628,7 @@ class Orchestrator:
             f"{task_id}: confidence={decision.probability:.3f} below "
             f"{decision.threshold:.3f}; not submitted"
         )
+        self._set_work_state(task_id, None)
 
     def _handle_verify(
         self,
@@ -459,7 +636,8 @@ class Orchestrator:
         verify_job: VerifyJob,
         submission_pool: ThreadPoolExecutor,
         submissions: dict[
-            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+            Future[dict[str, Any]],
+            tuple[SolveOutcome, ConfidenceDecision],
         ],
     ) -> None:
         primary = verify_job.outcome
@@ -471,6 +649,7 @@ class Orchestrator:
             != primary.candidate.answer_sha256
         ):
             self.log(f"{task_id}: independent verifier did not match")
+            self._set_work_state(task_id, None)
             return
         evidence = primary.candidate.evidence
         matched = replace(
@@ -498,6 +677,7 @@ class Orchestrator:
             self.log(
                 f"{task_id}: matching verifier still below confidence gate"
             )
+            self._set_work_state(task_id, None)
 
     def run(self) -> None:
         started = time.monotonic()
@@ -505,7 +685,8 @@ class Orchestrator:
         active: dict[Future[SolveOutcome], SolveJob] = {}
         verifiers: dict[Future[SolveOutcome], VerifyJob] = {}
         submissions: dict[
-            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+            Future[dict[str, Any]],
+            tuple[SolveOutcome, ConfidenceDecision],
         ] = {}
         last_phase: Phase | None = None
         with (
@@ -532,11 +713,27 @@ class Orchestrator:
                         continue
                     next_board_refresh = now + self.config.board_poll_seconds
                     if snapshot.phase is not last_phase:
+                        previous_phase = last_phase
                         self.log(
                             f"phase={snapshot.phase.value} "
                             f"open_tiles={len(snapshot.tiles)}"
                         )
                         last_phase = snapshot.phase
+                        if previous_phase is not None:
+                            open_ids = {tile.id for tile in snapshot.tiles}
+                            stale = [
+                                item
+                                for item in self._pending_submissions
+                                if item[0].job.tile.id not in open_ids
+                            ]
+                            for item in stale:
+                                self._pending_submissions.remove(item)
+                                task_id = item[0].job.tile.id
+                                self._set_work_state(task_id, None)
+                                self.log(
+                                    f"{task_id}: cancelled pending candidate "
+                                    "after phase change"
+                                )
                     if snapshot.phase is Phase.ENDED:
                         return
                     if self._playable(snapshot):
@@ -548,6 +745,9 @@ class Orchestrator:
                         } | {
                             outcome.job.tile.id
                             for outcome, _ in submissions.values()
+                        } | {
+                            outcome.job.tile.id
+                            for outcome, _ in self._pending_submissions
                         }
                         occupied_categories = {
                             job.tile.category for job in active.values()
@@ -557,9 +757,15 @@ class Orchestrator:
                         } | {
                             outcome.job.tile.category
                             for outcome, _ in submissions.values()
+                        } | {
+                            outcome.job.tile.category
+                            for outcome, _ in self._pending_submissions
                         }
                         slots = self.config.workers - len(active)
-                        if len(submissions) >= self.config.workers * 2:
+                        if (
+                            len(submissions) + len(self._pending_submissions)
+                            >= self.config.workers * 2
+                        ):
                             slots = 0
                         ranked = self._rank_available(snapshot, reserved)
                         for tile, priority in self._diverse_take(
@@ -575,6 +781,7 @@ class Orchestrator:
                                 solve_number,
                             )
                             active[solver_pool.submit(self._solve, job)] = job
+                            self._set_work_state(tile.id, "solving")
                             if self._evaluation_active():
                                 self._practice_attempted.add(tile.id)
                             self.log(
@@ -593,6 +800,26 @@ class Orchestrator:
                         and self._playable(snapshot)
                         and not self._rank_available(snapshot, set())
                     ):
+                        deferred = [
+                            ready_at
+                            for task_id, ready_at in self._deferred_until.items()
+                            if ready_at > time.monotonic()
+                            and any(
+                                tile.id == task_id
+                                for tile in snapshot.tiles
+                            )
+                        ]
+                        if deferred:
+                            time.sleep(
+                                min(
+                                    0.25,
+                                    max(
+                                        0.0,
+                                        min(deferred) - time.monotonic(),
+                                    ),
+                                )
+                            )
+                            continue
                         self.log(
                             f"practice evaluation complete: "
                             f"{len(self._practice_attempted)} tile(s)"
@@ -620,6 +847,79 @@ class Orchestrator:
                             submissions,
                         )
                     else:
-                        submissions.pop(future)
-                        future.result()
+                        outcome, decision = submissions.pop(future)
+                        task_id = outcome.job.tile.id
+                        retry_queued = False
+                        try:
+                            payload = future.result()
+                            if payload.get("result") == "rate_limited":
+                                failures = (
+                                    self._submission_failures.get(task_id, 0)
+                                    + 1
+                                )
+                                self._submission_failures[task_id] = failures
+                                snapshot = self._get_snapshot()
+                                still_open = (
+                                    snapshot is not None
+                                    and any(
+                                        tile.id == task_id
+                                        for tile in snapshot.tiles
+                                    )
+                                )
+                                if failures <= 1 and still_open:
+                                    self.log(
+                                        f"{task_id}: rate limit retries "
+                                        "exhausted; one queued retry retained"
+                                    )
+                                    self._queue_submit(
+                                        outcome,
+                                        decision,
+                                        submission_pool,
+                                        submissions,
+                                    )
+                                    retry_queued = True
+                                else:
+                                    self.log(
+                                        f"{task_id}: rate-limited candidate "
+                                        "dropped after bounded retry"
+                                    )
+                            else:
+                                self._submission_failures.pop(task_id, None)
+                        except Exception as error:
+                            failures = (
+                                self._submission_failures.get(task_id, 0) + 1
+                            )
+                            self._submission_failures[task_id] = failures
+                            snapshot = self._get_snapshot()
+                            still_open = (
+                                snapshot is not None
+                                and any(
+                                    tile.id == task_id
+                                    for tile in snapshot.tiles
+                                )
+                            )
+                            if failures <= 1 and still_open:
+                                self.log(
+                                    f"{task_id}: submission transport failed; "
+                                    "one bounded retry queued "
+                                    f"({type(error).__name__})"
+                                )
+                                self._queue_submit(
+                                    outcome,
+                                    decision,
+                                    submission_pool,
+                                    submissions,
+                                )
+                                retry_queued = True
+                            else:
+                                self.log(
+                                    f"{task_id}: submission failed: "
+                                    f"{type(error).__name__}: {error}"
+                                )
+                        finally:
+                            if not retry_queued:
+                                self._set_work_state(task_id, None)
+                        self._dispatch_next_submission(
+                            submission_pool, submissions
+                        )
                     next_board_refresh = 0.0

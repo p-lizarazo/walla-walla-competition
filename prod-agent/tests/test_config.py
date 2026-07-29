@@ -21,6 +21,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model, "claude-haiku-4-5")
         self.assertGreaterEqual(config.submission_interval_seconds, 3)
         self.assertEqual(config.cpu_workers, 1)
+        self.assertEqual(config.workers, 4)
+        self.assertEqual(config.fallback_workers, 1)
+        self.assertEqual(config.max_tokens, 1024)
 
     def test_rejects_invalid_confidence_order(self) -> None:
         environment = {
@@ -36,6 +39,14 @@ class ConfigTests(unittest.TestCase):
         environment = {**self.base_env(), "VERIFIER_WORKERS": "0"}
         with patch.dict(os.environ, environment, clear=True):
             self.assertEqual(Config.from_env().verifier_workers, 0)
+
+    def test_thinking_reserves_output_headroom(self) -> None:
+        environment = {**self.base_env(), "THINKING_ENABLED": "1"}
+        with patch.dict(os.environ, environment, clear=True):
+            config = Config.from_env()
+        self.assertGreaterEqual(
+            config.max_tokens, config.thinking_budget_500 + 512
+        )
 
 
 if __name__ == "__main__":

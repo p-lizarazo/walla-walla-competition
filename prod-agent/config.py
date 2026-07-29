@@ -21,7 +21,7 @@ def _float(name: str, default: float, minimum: float = 0.0) -> float:
 def _temperatures() -> tuple[float, ...]:
     values = tuple(
         float(value.strip())
-        for value in os.environ.get("TEMPERATURES", "0.0,0.15,0.3").split(",")
+        for value in os.environ.get("TEMPERATURES", "0.0").split(",")
         if value.strip()
     )
     if not values or any(value < 0 or value > 1 for value in values):
@@ -59,6 +59,9 @@ class Config:
     practice_results_path: str
     task_filter: tuple[str, ...]
     experiment_id: str
+    fallback_workers: int = 1
+    model_timeout_seconds: float = 10.0
+    fallback_deadline_seconds: float = 22.0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -75,6 +78,16 @@ class Config:
         urgent_floor = _float("URGENT_CONFIDENCE_FLOOR", 0.80)
         if not 0 <= urgent_floor <= strong_threshold <= 1:
             raise ValueError("confidence thresholds must satisfy 0 <= urgent <= strong <= 1")
+        thinking_enabled = os.environ.get("THINKING_ENABLED", "0") == "1"
+        thinking_budget_400 = _int("THINKING_BUDGET_400", 1024)
+        thinking_budget_500 = _int("THINKING_BUDGET_500", 1536)
+        max_tokens = _int("MAX_TOKENS", 1024)
+        if thinking_enabled:
+            max_tokens = max(
+                max_tokens,
+                thinking_budget_400 + 512,
+                thinking_budget_500 + 512,
+            )
         return cls(
             base_url=base_url,
             team_api_key=team_api_key,
@@ -86,28 +99,28 @@ class Config:
             ),
             model="claude-haiku-4-5",
             mode=mode,
-            workers=_int("WORKERS", 6),
+            workers=_int("WORKERS", 4),
             verifier_workers=_int("VERIFIER_WORKERS", 0, minimum=0),
             cpu_workers=_int("CPU_WORKERS", 1),
-            max_turns=_int("MAX_TURNS", 8),
-            max_tokens=_int("MAX_TOKENS", 2048),
-            max_tool_output=_int("MAX_TOOL_OUTPUT", 6_000),
-            python_timeout_seconds=_int("PYTHON_TIMEOUT_SECONDS", 60),
+            max_turns=_int("MAX_TURNS", 4),
+            max_tokens=max_tokens,
+            max_tool_output=_int("MAX_TOOL_OUTPUT", 4_000),
+            python_timeout_seconds=_int("PYTHON_TIMEOUT_SECONDS", 12),
             python_memory_mb=_int("PYTHON_MEMORY_MB", 1024),
-            board_poll_seconds=_float("BOARD_POLL_SECONDS", 3.0, minimum=0.5),
+            board_poll_seconds=_float("BOARD_POLL_SECONDS", 1.0, minimum=0.5),
             run_duration_seconds=_float(
                 "RUN_DURATION_SECONDS", 0.0, minimum=0.0
             ),
             submission_interval_seconds=_float(
-                "SUBMISSION_INTERVAL_SECONDS", 3.1, minimum=3.0
+                "SUBMISSION_INTERVAL_SECONDS", 3.05, minimum=3.0
             ),
             strong_confidence_threshold=strong_threshold,
             urgent_confidence_floor=urgent_floor,
             temperatures=_temperatures(),
-            thinking_enabled=os.environ.get("THINKING_ENABLED", "0") == "1",
+            thinking_enabled=thinking_enabled,
             thinking_min_points=_int("THINKING_MIN_POINTS", 400),
-            thinking_budget_400=_int("THINKING_BUDGET_400", 1024),
-            thinking_budget_500=_int("THINKING_BUDGET_500", 1536),
+            thinking_budget_400=thinking_budget_400,
+            thinking_budget_500=thinking_budget_500,
             playbooks_path=os.environ.get("PLAYBOOKS_PATH", "playbooks.json"),
             practice_results_path=os.environ.get(
                 "PRACTICE_RESULTS_PATH", "practice_results.jsonl"
@@ -118,6 +131,13 @@ class Config:
                 if task_id.strip()
             ),
             experiment_id=os.environ.get("EXPERIMENT_ID", "default"),
+            fallback_workers=_int("FALLBACK_WORKERS", 1),
+            model_timeout_seconds=_float(
+                "MODEL_TIMEOUT_SECONDS", 10.0, minimum=1.0
+            ),
+            fallback_deadline_seconds=_float(
+                "FALLBACK_DEADLINE_SECONDS", 22.0, minimum=1.0
+            ),
         )
 
     def thinking_budget(self, points: int) -> int | None:

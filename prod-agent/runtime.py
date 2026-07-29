@@ -113,10 +113,13 @@ class ProductionToolRuntime:
             elif name == "run_python":
                 result = self.python.run(
                     arguments["code"],
-                    timeout_seconds=int(
-                        arguments.get(
-                            "timeout", self.config.python_timeout_seconds
-                        )
+                    timeout_seconds=min(
+                        int(
+                            arguments.get(
+                                "timeout", self.config.python_timeout_seconds
+                            )
+                        ),
+                        self.config.python_timeout_seconds,
                     ),
                 )
                 output = result.render(self.config.max_tool_output)

@@ -187,6 +187,8 @@ class AnthropicSolver:
         return Anthropic(
             api_key=self.config.anthropic_api_key,
             base_url=self.config.anthropic_base_url,
+            timeout=self.config.model_timeout_seconds,
+            max_retries=0,
         )
 
     def _system_prompt(
@@ -241,6 +243,7 @@ answer_file instead of retyping it."""
         workdir: str,
         temperature: float,
         runtime: ToolRuntime,
+        should_continue: Callable[[], bool] | None = None,
     ) -> Candidate | None:
         client = self._client()
         thinking_budget = self.config.thinking_budget(task.points)
@@ -250,6 +253,8 @@ answer_file instead of retyping it."""
         ]
         started = time.monotonic()
         for turn in range(self.config.max_turns):
+            if should_continue is not None and not should_continue():
+                return runtime.candidate
             request: dict[str, Any] = dict(
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
@@ -274,6 +279,8 @@ answer_file instead of retyping it."""
                 return runtime.candidate
             results: list[dict[str, Any]] = []
             for call in calls:
+                if should_continue is not None and not should_continue():
+                    return runtime.candidate
                 execution = runtime.execute(call.name, dict(call.input))
                 result: dict[str, Any] = {
                     "type": "tool_result",
