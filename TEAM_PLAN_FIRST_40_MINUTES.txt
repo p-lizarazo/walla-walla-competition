@@ -1,0 +1,242 @@
+AGENT JEOPARDY — FIRST 40-MINUTE TEAM PLAN
+============================================
+
+Goal for this iteration
+-----------------------
+Ship one stable hosted agent that can:
+
+  1. Poll the practice/scored board for every currently open tile.
+  2. Work a small number of independent tiles concurrently.
+  3. Let the model inspect task files and run Python before answering.
+  4. Submit only a clearly marked, non-empty final answer.
+  5. Stay alive when a tile, file, or model call fails.
+
+This is intentionally an MVP. Do not try to solve every task category in the
+first 40 minutes. A working code-and-file agent is the priority. The practice
+board is the test environment; it is safe to use and has no scoring penalty.
+
+Important operating fact: the team gets ONE hosted agent at a time. Uploading
+another agent.zip immediately replaces and restarts the current one. Teammates
+may test variants locally, but deployment is sequential: deploy → inspect
+logs → improve → redeploy.
+
+
+How the project works
+---------------------
+Files to read first:
+
+  README.md     Rules, game API, categories, deployment, and constraints.
+  main.py       Current naive baseline and the implementation brief at top.
+  jeopardy.py   Provided helpers: board(), open_tiles(), task(), fetch_files(),
+                anthropic_client(), submit(), and logging.
+
+Basic flow:
+
+  jp.board()              Get current board and phase.
+  jp.open_tiles(board)    Get EVERY currently open tile, including stacked
+                           variants. Do not use only a cell's visible id.
+  jp.task(tile_id)        Fetch one task's prompt, points, answer format, etc.
+  jp.fetch_files(...)     Download task files into jp.workdir(tile_id).
+  model + tools           The model requests actions; our Python code performs
+                           them and returns results; repeat for a few turns.
+  jp.submit(id, answer)   Submit the final answer.
+
+The game rewards correct answers first. It has a team-wide submission limit of
+one answer per three seconds, but model/tool work can run in parallel. Wrong
+scored answers lose points and cause tile cooldowns, so do not submit free-form
+model chatter. Each task's answer_format tells us how the checker compares the
+answer.
+
+
+Team coordination rules
+-----------------------
+  - One person is the INTEGRATOR and is the only person editing main.py.
+  - Other people work in separate new modules, so changes do not collide.
+  - Do not put the team key in code. It remains in .env, which is local only.
+  - Keep external packages to a minimum; use the packages already listed in
+    requirements.txt when possible.
+  - Test only practice tiles until the team agrees to deploy.
+  - Communicate a small handoff: module name, public function(s), test command,
+    and known limitations.
+
+
+WORKLOAD 1 — MODEL TOOL-USE LOOP
+================================
+Owner: Person 1 (also the integrator)
+Files owned: agent_loop.py (new), main.py
+
+Outcome:
+Create a reusable function that gives the model a task, responds to its tool
+requests, and returns either a final answer or no answer after a safe turn cap.
+
+Public interface to implement:
+
+  solve_task(detail: dict, task_id: str, tool_runner) -> str | None
+
+Required first-version behavior:
+  - Tell the model the task prompt, downloaded work directory, and answer_format.
+  - Provide tool definitions supplied by the tools module.
+  - Call Claude, execute each requested tool through tool_runner, then send
+    tool_result content back to Claude.
+  - Limit each tile to 5 model/tool turns and handle malformed replies.
+  - Ask the model to finish with exactly one final answer, preferably in a
+    structured marker such as FINAL_ANSWER: <answer>.
+  - Return only the extracted answer string; never submit from this module.
+
+Starter prompt for this owner:
+
+  "You own the first-pass Claude tool-use loop for this Agent Jeopardy starter
+  kit. Read the docstring in main.py and the model helper in jeopardy.py. Create
+  agent_loop.py with solve_task(detail, task_id, tool_runner) -> str | None.
+  Use the Anthropic SDK tool_use/tool_result protocol, cap each task at five
+  turns, and safely extract only a final answer marked FINAL_ANSWER:. Do not
+  edit scheduling or submission code. Give me a short test plan and handoff."
+
+
+WORKLOAD 2 — SAFE LOCAL TASK TOOLS
+==================================
+Owner: Person 2
+Files owned: agent_tools.py (new)
+
+Outcome:
+Give the model useful, bounded actions for file-based tasks. These are the
+highest-value tools for Cryptic, Heavy Compute, Needle in the Haystack, and
+Ship It tasks.
+
+Public interface to implement:
+
+  TOOL_DEFINITIONS: list[dict]
+  run_tool(name: str, input_data: dict, task_workdir: str) -> str
+
+Implement only these tools now:
+  - list_files: recursively list files below task_workdir, with sizes.
+  - read_file: return a bounded UTF-8 text excerpt from a relative path.
+  - run_python: execute a short Python script in task_workdir with a timeout;
+                return stdout/stderr and exit status.
+
+Safety/reliability requirements:
+  - Reject paths outside task_workdir.
+  - Cap output (for example 12,000 characters).
+  - Use a timeout for Python execution.
+  - Return errors as tool text; never crash the whole agent.
+  - Do not add shell access in iteration one.
+
+Starter prompt for this owner:
+
+  "Build agent_tools.py for an Agent Jeopardy MVP. It must export Anthropic
+  TOOL_DEFINITIONS and run_tool(name, input_data, task_workdir) -> str. Add
+  list_files, bounded read_file, and time-limited run_python. All paths must
+  remain inside the individual task work directory, outputs must be capped, and
+  errors must return readable text instead of raising. Do not edit main.py.
+  Include a tiny local test or example invocation for your handoff."
+
+
+WORKLOAD 3 — QUEUE, CONCURRENCY, AND SUBMISSION GUARDRAILS
+===========================================================
+Owner: Person 3
+Files owned: scheduler.py (new)
+
+Outcome:
+Turn a current board into a small safe batch of tasks and serialize actual
+submissions at the game's one-per-three-seconds limit.
+
+Public interface to implement:
+
+  select_open_tiles(board: dict, limit: int) -> list[str]
+  submit_safely(task_id: str, answer: str) -> dict
+
+Required first-version behavior:
+  - Select from jp.open_tiles(board), which includes all stacked variants.
+  - Prefer lower-point / likely simpler tiles first; use a configurable worker
+    limit of 3. Do not try to solve hundreds in the first pass.
+  - submit_safely must lock around jp.submit, wait at least 3.1 seconds after a
+    submission, and never submit blank answers.
+  - Treat rate_limited, already_claimed, locked_out, and wrong_phase as normal
+    outcomes and return them without crashing.
+  - Keep dependencies standard-library only.
+
+Starter prompt for this owner:
+
+  "Create scheduler.py for the Agent Jeopardy MVP. Implement select_open_tiles
+  using jp.open_tiles(board), with a conservative configurable limit and a
+  simple low-point-first ordering. Implement a thread-safe submit_safely that
+  serializes jp.submit calls, refuses blank answers, and enforces at least 3.1
+  seconds between attempts. Return normal game outcomes without exceptions.
+  Do not edit main.py or add concurrency execution itself; provide a handoff
+  with function signatures and a small test strategy."
+
+
+WORKLOAD 4 — PRACTICE QA, PACKAGING, AND DEPLOYMENT RUNBOOK
+============================================================
+Owner: Person 4
+Files owned: TEST_AND_DEPLOYMENT.md (new), requirements.txt only if needed
+
+Outcome:
+Make it easy to tell whether the agent works locally and whether the uploaded
+zip will run unattended. This owner should test, report findings, and avoid
+changing core implementation unless assigned a small fix by the integrator.
+
+Required first-version work:
+  - Read README.md's Ship It and API sections.
+  - Make a short runbook: source .env; run one chosen practice tile; run a
+    small batch; zip from inside the project directory; inspect zip contents;
+    upload; check agent status/logs.
+  - Verify main.py, jeopardy.py, and all new modules land at zip root.
+  - Identify the exact command for the local .venv:
+        source .env && .venv/bin/python main.py
+  - Test the integrated agent only after the integrator says it is ready.
+  - Record failures with tile ID, command, observed result, and logs.
+
+Starter prompt for this owner:
+
+  "Act as QA and release owner for this Agent Jeopardy MVP. Read README.md,
+  main.py, and requirements.txt. Create TEST_AND_DEPLOYMENT.md with exact,
+  beginner-friendly commands for local practice testing, zip validation,
+  deployment, and hosted-log checks. Do not deploy or submit a scored answer
+  without team approval. When the integration is ready, test one or two
+  practice tiles and report failures as reproducible observations."
+
+
+40-minute schedule
+------------------
+Minutes 0–5:
+  - Everyone reads README.md, main.py's top docstring, and this plan.
+  - Assign owners. Person 1 creates the integration branch/file boundaries.
+
+Minutes 5–22:
+  - People 1–3 implement in parallel in their own modules.
+  - Person 4 writes the runbook and prepares a test checklist.
+
+Minutes 22–30:
+  - Person 1 wires agent_loop.py, agent_tools.py, and scheduler.py into main.py.
+  - Keep main.py small: fetch → dispatch a few workers → solve → submit safely.
+
+Minutes 30–35:
+  - Run one known practice tile using TASK_FILTER.
+  - Fix crashes, missing imports, bad tool schemas, and malformed final answers.
+
+Minutes 35–38:
+  - Run up to three practice tiles with three workers.
+  - Inspect output. Verify submissions obey the shared rate limit.
+
+Minutes 38–40:
+  - Zip and inspect contents. Deploy the single integrated agent.
+  - Check /api/agent/status and /api/agent/logs immediately.
+
+
+Definition of done for iteration one
+------------------------------------
+  [ ] The agent stays running and polls rather than exiting after one pass.
+  [ ] It sees all open_ids, not only one visible tile per board cell.
+  [ ] It can work at least 2–3 tasks concurrently.
+  [ ] The model can list/read task files and run Python in the task directory.
+  [ ] Tool calls are bounded by turn, output, and execution-time limits.
+  [ ] Submissions are serialized and spaced by at least 3 seconds.
+  [ ] It does not submit blank text or model explanations as answers.
+  [ ] agent.zip has main.py at its root and contains every new imported module.
+
+After this iteration
+--------------------
+Add category-specific solvers and a real verification pass. Do not block this
+first release on website automation, a perfect answer parser, or a complex
+priority algorithm. First establish a durable, observable tool-use agent.
