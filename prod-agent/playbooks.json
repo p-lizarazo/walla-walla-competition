@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "practice_eval": {
+    "results_path": "practice_results.jsonl",
+    "record_fields": [
+      "timestamp",
+      "task_id",
+      "category",
+      "points",
+      "signature",
+      "playbook_version",
+      "temperature",
+      "elapsed_seconds",
+      "tool_turns",
+      "confidence",
+      "submitted",
+      "result",
+      "answer_sha256",
+      "failure_stage",
+      "error_type"
+    ]
+  },
+  "generic": [
+    "Inspect the supplied bytes or live responses before choosing an approach.",
+    "Compute and verify candidates programmatically; preserve the exact computed value through submission.",
+    "Stop rather than guess when required input or verification is incomplete."
+  ],
+  "tiers": {
+    "4": [
+      "Use an independent recomputation or invariant check before submitting."
+    ],
+    "5": [
+      "Use two independent checks and prefer bounded deterministic search over model-only reasoning."
+    ]
+  },
+  "categories": {
+    "needle-in-the-haystack": [
+      "Normalize records into typed fields, implement grouping and tie rules explicitly, then check the winning rows against raw input."
+    ],
+    "the-dark-web": [
+      "Keep one HTTP session, parse each response for the next required state, and preserve server-directed ordering."
+    ],
+    "ship-it": [
+      "Reproduce the failure, inspect the narrow call path, make the smallest complete fix, and run targeted tests."
+    ],
+    "ancient-scrolls": [
+      "Build a structured timeline or reference map and resolve the requested state at the target time."
+    ],
+    "cryptic": [
+      "Inspect file signatures and format notes, decode in explicit stages, and validate lengths and uniqueness."
+    ],
+    "heavy-compute": [
+      "Define the objective, hard constraints, and a fast validator before running bounded exact or heuristic search."
+    ]
+  },
+  "signatures": [
+    {
+      "id": "mixed-timestamps",
+      "category": "Needle in the Haystack",
+      "keywords": ["iso 8601", "syslog", "session gap"],
+      "methods": [
+        "Parse each timestamp grammar separately, normalize to one timezone, sort per entity, and apply the exact gap boundary."
+      ]
+    },
+    {
+      "id": "stateful-http",
+      "category": "The Dark Web",
+      "keywords": ["multi-step", "required header", "visit in order"],
+      "methods": [
+        "Model the interaction as a state machine and verify completion from the terminal response."
+      ]
+    },
+    {
+      "id": "amendment-history",
+      "category": "Ancient Scrolls",
+      "keywords": ["amendment", "revoked", "effective date", "in force"],
+      "methods": [
+        "Structure changes by effective date, exclude revoked or superseded entries, and select the latest valid state."
+      ]
+    },
+    {
+      "id": "binary-records",
+      "category": "Cryptic",
+      "keywords": ["binary format", "little-endian", "big-endian", ".bin"],
+      "methods": [
+        "Parse with explicit offsets and byte order; assert header, count, field lengths, and end-of-file alignment."
+      ]
+    },
+    {
+      "id": "subset-sum",
+      "category": "Heavy Compute",
+      "keywords": ["subset sum", "exactly k", "target sum"],
+      "methods": [
+        "Use meet-in-the-middle grouped by subset size, then validate bounds, uniqueness, cardinality, and exact total."
+      ]
+    },
+    {
+      "id": "route-optimization",
+      "category": "Heavy Compute",
+      "keywords": ["tour", "route", "euclidean distance", "visit each"],
+      "methods": [
+        "Try several deterministic starts, improve with edge exchanges, and independently recalculate the best valid route."
+      ]
+    }
+  ]
+}

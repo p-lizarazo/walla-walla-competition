@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import unittest
+
+from models import Priority, Tile
+from orchestrator import Orchestrator
+
+
+def pair(task_id: str, category: str, points: int, score: float):
+    tile = Tile(task_id, category, points)
+    priority = Priority(task_id, score, 0.9, 10, 1, points, ())
+    return tile, priority
+
+
+class OrchestratorTests(unittest.TestCase):
+    def test_parallel_wave_reserves_capacity_for_500s(self) -> None:
+        ranked = [
+            pair("fast200", "Cryptic", 200, 10),
+            pair("five-a", "Heavy Compute", 500, 4),
+            pair("five-b", "The Dark Web", 500, 3),
+            pair("other", "Ship It", 300, 2),
+        ]
+
+        chosen = Orchestrator._diverse_take(ranked, 2)
+
+        self.assertEqual(chosen[0][0].points, 500)
+        self.assertEqual(len(chosen), 2)
+
+    def test_parallel_wave_fills_missing_category_lane(self) -> None:
+        ranked = [
+            pair("cryptic", "Cryptic", 300, 10),
+            pair("web", "The Dark Web", 300, 9),
+            pair("ship", "Ship It", 300, 8),
+        ]
+
+        chosen = Orchestrator._diverse_take(
+            ranked, 1, occupied_categories={"Cryptic", "The Dark Web"}
+        )
+
+        self.assertEqual(chosen[0][0].category, "Ship It")
+
+
+if __name__ == "__main__":
+    unittest.main()
