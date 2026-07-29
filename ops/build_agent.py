@@ -22,7 +22,16 @@ REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = REPOSITORY / "prod-agent"
 DEFAULT_OUTPUT = REPOSITORY / "agent.zip"
 
-EXCLUDED_DIRECTORIES = frozenset({"tests", "evals", "__pycache__", ".git", ".venv"})
+EXCLUDED_DIRECTORIES = frozenset(
+    {
+        "tests",
+        "evals",
+        "benchmark-data",
+        "__pycache__",
+        ".git",
+        ".venv",
+    }
+)
 EXCLUDED_SUFFIXES = (".pyc", ".pyo", ".jsonl", ".log", ".zip", ".md")
 MAX_COMPRESSED_BYTES = 20 * 1024 * 1024
 

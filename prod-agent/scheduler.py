@@ -28,12 +28,13 @@ _CATEGORY_DEFAULTS: dict[str, PerformanceEstimate] = {
 }
 _DEFAULT_CATEGORY = PerformanceEstimate(0.70, 85.0)
 _FAST_TEMPLATE_ESTIMATES: dict[tuple[str, int], PerformanceEstimate] = {
-    ("ancient scrolls", 100): PerformanceEstimate(0.99, 2.0),
-    ("cryptic", 200): PerformanceEstimate(0.98, 2.0),
-    ("heavy compute", 100): PerformanceEstimate(0.99, 1.0),
-    ("needle in the haystack", 500): PerformanceEstimate(0.98, 3.0),
-    ("ship it", 200): PerformanceEstimate(0.99, 2.0),
-    ("the dark web", 200): PerformanceEstimate(0.97, 3.0),
+    # Effective seconds include observed claim urgency, not just CPU time.
+    ("ancient scrolls", 100): PerformanceEstimate(0.99, 0.58),
+    ("cryptic", 200): PerformanceEstimate(0.98, 0.50),
+    ("heavy compute", 100): PerformanceEstimate(0.99, 0.50),
+    ("needle in the haystack", 500): PerformanceEstimate(0.98, 4.90),
+    ("ship it", 200): PerformanceEstimate(0.99, 1.24),
+    ("the dark web", 200): PerformanceEstimate(0.97, 0.80),
 }
 _TIER_ADJUSTMENTS: dict[int, tuple[float, float]] = {
     100: (0.15, 0.55),
