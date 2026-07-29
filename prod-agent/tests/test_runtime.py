@@ -39,6 +39,7 @@ def config() -> Config:
         playbooks_path="playbooks.json",
         practice_results_path="practice_results.jsonl",
         task_filter=(),
+        experiment_id="test",
     )
 
 

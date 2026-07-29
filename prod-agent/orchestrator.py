@@ -286,13 +286,16 @@ class Orchestrator:
 
     @staticmethod
     def _diverse_take(
-        ranked: list[tuple[Tile, Priority]], slots: int
+        ranked: list[tuple[Tile, Priority]],
+        slots: int,
+        occupied_categories: set[str] | None = None,
     ) -> list[tuple[Tile, Priority]]:
         if slots <= 0:
             return []
         chosen: list[tuple[Tile, Priority]] = []
-        categories: set[str] = set()
-        high_value_slots = max(1, slots // 2)
+        categories = set(occupied_categories or ())
+        high_value_slots = 1
+        selected_high_value = 0
         for item in ranked:
             if (
                 item[0].points == 500
@@ -300,7 +303,8 @@ class Orchestrator:
             ):
                 chosen.append(item)
                 categories.add(item[0].category)
-                if len(chosen) == high_value_slots:
+                selected_high_value += 1
+                if selected_high_value == high_value_slots:
                     break
         if len(chosen) >= slots:
             return chosen[:slots]
@@ -331,6 +335,7 @@ class Orchestrator:
             return
         candidate = outcome.candidate
         self.practice_log.append(
+            experiment_id=self.config.experiment_id,
             task_id=outcome.job.tile.id,
             category=outcome.job.tile.category,
             points=outcome.job.tile.points,
@@ -338,6 +343,10 @@ class Orchestrator:
             thinking_budget=self.config.thinking_budget(
                 outcome.job.tile.points
             ),
+            workers=self.config.workers,
+            max_turns=self.config.max_turns,
+            max_tokens=self.config.max_tokens,
+            max_tool_output=self.config.max_tool_output,
             elapsed_seconds=(
                 candidate.elapsed_seconds if candidate is not None else None
             ),
@@ -540,11 +549,22 @@ class Orchestrator:
                             outcome.job.tile.id
                             for outcome, _ in submissions.values()
                         }
+                        occupied_categories = {
+                            job.tile.category for job in active.values()
+                        } | {
+                            job.outcome.job.tile.category
+                            for job in verifiers.values()
+                        } | {
+                            outcome.job.tile.category
+                            for outcome, _ in submissions.values()
+                        }
                         slots = self.config.workers - len(active)
                         if len(submissions) >= self.config.workers * 2:
                             slots = 0
                         ranked = self._rank_available(snapshot, reserved)
-                        for tile, priority in self._diverse_take(ranked, slots):
+                        for tile, priority in self._diverse_take(
+                            ranked, slots, occupied_categories
+                        ):
                             solve_number = self._solve_counts.get(tile.id, 0) + 1
                             self._solve_counts[tile.id] = solve_number
                             self._scheduled_at += 1

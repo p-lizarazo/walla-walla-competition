@@ -21,7 +21,7 @@ def _float(name: str, default: float, minimum: float = 0.0) -> float:
 def _temperatures() -> tuple[float, ...]:
     values = tuple(
         float(value.strip())
-        for value in os.environ.get("TEMPERATURES", "0.0,0.25,0.5").split(",")
+        for value in os.environ.get("TEMPERATURES", "0.0,0.15,0.3").split(",")
         if value.strip()
     )
     if not values or any(value < 0 or value > 1 for value in values):
@@ -58,6 +58,7 @@ class Config:
     playbooks_path: str
     practice_results_path: str
     task_filter: tuple[str, ...]
+    experiment_id: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -85,12 +86,12 @@ class Config:
             ),
             model="claude-haiku-4-5",
             mode=mode,
-            workers=_int("WORKERS", 4),
-            verifier_workers=_int("VERIFIER_WORKERS", 1, minimum=0),
+            workers=_int("WORKERS", 6),
+            verifier_workers=_int("VERIFIER_WORKERS", 0, minimum=0),
             cpu_workers=_int("CPU_WORKERS", 1),
-            max_turns=_int("MAX_TURNS", 20),
-            max_tokens=_int("MAX_TOKENS", 4096),
-            max_tool_output=_int("MAX_TOOL_OUTPUT", 12_000),
+            max_turns=_int("MAX_TURNS", 8),
+            max_tokens=_int("MAX_TOKENS", 2048),
+            max_tool_output=_int("MAX_TOOL_OUTPUT", 6_000),
             python_timeout_seconds=_int("PYTHON_TIMEOUT_SECONDS", 60),
             python_memory_mb=_int("PYTHON_MEMORY_MB", 1024),
             board_poll_seconds=_float("BOARD_POLL_SECONDS", 3.0, minimum=0.5),
@@ -103,10 +104,10 @@ class Config:
             strong_confidence_threshold=strong_threshold,
             urgent_confidence_floor=urgent_floor,
             temperatures=_temperatures(),
-            thinking_enabled=os.environ.get("THINKING_ENABLED", "1") == "1",
+            thinking_enabled=os.environ.get("THINKING_ENABLED", "0") == "1",
             thinking_min_points=_int("THINKING_MIN_POINTS", 400),
             thinking_budget_400=_int("THINKING_BUDGET_400", 1024),
-            thinking_budget_500=_int("THINKING_BUDGET_500", 2048),
+            thinking_budget_500=_int("THINKING_BUDGET_500", 1536),
             playbooks_path=os.environ.get("PLAYBOOKS_PATH", "playbooks.json"),
             practice_results_path=os.environ.get(
                 "PRACTICE_RESULTS_PATH", "practice_results.jsonl"
@@ -116,6 +117,7 @@ class Config:
                 for task_id in os.environ.get("TASK_FILTER", "").split(",")
                 if task_id.strip()
             ),
+            experiment_id=os.environ.get("EXPERIMENT_ID", "default"),
         )
 
     def thinking_budget(self, points: int) -> int | None:

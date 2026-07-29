@@ -26,6 +26,19 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(chosen[0][0].points, 500)
         self.assertEqual(len(chosen), 2)
 
+    def test_parallel_wave_fills_missing_category_lane(self) -> None:
+        ranked = [
+            pair("cryptic", "Cryptic", 300, 10),
+            pair("web", "The Dark Web", 300, 9),
+            pair("ship", "Ship It", 300, 8),
+        ]
+
+        chosen = Orchestrator._diverse_take(
+            ranked, 1, occupied_categories={"Cryptic", "The Dark Web"}
+        )
+
+        self.assertEqual(chosen[0][0].category, "Ship It")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -167,6 +167,7 @@ TOOLS = [
         },
     },
 ]
+TOOL_BY_NAME = {tool["name"]: tool for tool in TOOLS}
 
 
 class AnthropicSolver:
@@ -215,11 +216,24 @@ computation, binary handling, or validation, run Python against the actual task
 materials. Preserve cookies for web flows. Check problem status before lengthy
 work and again before recording a candidate.
 
+Minimize latency and token use. Combine inspection, computation, and validation
+into as few tool calls as possible; prefer one comprehensive Python call over
+many incremental reads. Record the candidate immediately once verified.
+
 When the exact answer is verified, call record_candidate once. Include concrete
 checks, list every remaining assumption or tool failure, and mark whether the
 answer came directly from code/file/web output. For exact tokens or computed
 strings, write the answer to a task-relative file with Python and pass
 answer_file instead of retyping it."""
+
+    @staticmethod
+    def _tools_for_task(task: TaskDetail) -> list[dict[str, Any]]:
+        names = {"run_python", "get_problem_status", "record_candidate"}
+        if task.files:
+            names.update({"list_files", "read_file", "search_files", "archive"})
+        if task.category.strip().lower() == "the dark web":
+            names.add("web_request")
+        return [tool for tool in TOOLS if tool["name"] in names]
 
     def solve(
         self,
@@ -243,7 +257,7 @@ answer_file instead of retyping it."""
                 system=self._system_prompt(
                     task, inference_temperature, workdir
                 ),
-                tools=TOOLS,
+                tools=self._tools_for_task(task),
                 messages=messages,
             )
             if thinking_budget is not None:
