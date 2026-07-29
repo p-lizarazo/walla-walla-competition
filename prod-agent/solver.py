@@ -229,6 +229,8 @@ answer_file instead of retyping it."""
         runtime: ToolRuntime,
     ) -> Candidate | None:
         client = self._client()
+        thinking_budget = self.config.thinking_budget(task.points)
+        inference_temperature = 1.0 if thinking_budget is not None else temperature
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": "Solve this tile now with tools."}
         ]
@@ -237,12 +239,13 @@ answer_file instead of retyping it."""
             request: dict[str, Any] = dict(
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
-                temperature=temperature,
-                system=self._system_prompt(task, temperature, workdir),
+                temperature=inference_temperature,
+                system=self._system_prompt(
+                    task, inference_temperature, workdir
+                ),
                 tools=TOOLS,
                 messages=messages,
             )
-            thinking_budget = self.config.thinking_budget(task.points)
             if thinking_budget is not None:
                 request["thinking"] = {
                     "type": "enabled",
@@ -274,7 +277,7 @@ answer_file instead of retyping it."""
                     answer=candidate.answer,
                     answer_sha256=candidate.answer_sha256,
                     evidence=candidate.evidence,
-                    model_temperature=temperature,
+                    model_temperature=inference_temperature,
                     elapsed_seconds=round(time.monotonic() - started, 3),
                     tool_turns=turn + 1,
                 )

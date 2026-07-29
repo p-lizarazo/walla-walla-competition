@@ -28,8 +28,12 @@ def _plain(value: Any) -> Any:
     raise StatusProviderError(f"unsupported status value: {type(value).__name__}")
 
 
-_SECRET_WORDS = (
-    "key",
+_SECRET_FIELDS = (
+    "api_key",
+    "team_api_key",
+    "anthropic_api_key",
+    "access_token",
+    "refresh_token",
     "token",
     "secret",
     "credential",
@@ -37,6 +41,13 @@ _SECRET_WORDS = (
     "authorization",
     "cookie",
 )
+
+
+def _secret_field(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _SECRET_FIELDS or lowered.endswith(
+        ("_api_key", "_password", "_secret", "_credential")
+    )
 
 _PLAYABLE_BOARDS = {
     "practice": "practice",
@@ -72,7 +83,7 @@ def _safe_dashboard(value: Any) -> Any:
         return {
             str(key): _safe_dashboard(item)
             for key, item in value.items()
-            if not any(word in str(key).lower() for word in _SECRET_WORDS)
+            if not _secret_field(str(key))
         }
     if isinstance(value, list):
         return [_safe_dashboard(item) for item in value]

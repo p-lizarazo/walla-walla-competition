@@ -38,6 +38,7 @@ def config() -> Config:
         thinking_budget_500=2048,
         playbooks_path="playbooks.json",
         practice_results_path="practice_results.jsonl",
+        task_filter=(),
     )
 
 

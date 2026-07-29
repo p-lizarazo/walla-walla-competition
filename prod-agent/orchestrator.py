@@ -223,7 +223,9 @@ class Orchestrator:
             index = 0
         return values[(index + 1) % len(values)]
 
-    def _temperature(self, task_id: str, solve_number: int) -> float:
+    def _temperature(self, tile: Tile, solve_number: int) -> float:
+        if self.config.thinking_budget(tile.points) is not None:
+            return 1.0
         index = self._scheduled_at - 1
         return self.config.temperatures[index % len(self.config.temperatures)]
 
@@ -251,6 +253,11 @@ class Orchestrator:
         ranked = []
         for priority in priorities:
             tile = tile_by_id[priority.task_id]
+            if (
+                self.config.task_filter
+                and tile.id not in self.config.task_filter
+            ):
+                continue
             if tile.id in reserved:
                 continue
             if (
@@ -281,6 +288,8 @@ class Orchestrator:
                 categories.add(item[0].category)
                 if len(chosen) == high_value_slots:
                     break
+        if len(chosen) >= slots:
+            return chosen[:slots]
         for item in ranked:
             if item not in chosen and item[0].category not in categories:
                 chosen.append(item)
@@ -351,11 +360,27 @@ class Orchestrator:
             error_type=payload.get("rejection"),
         )
 
+    def _queue_submit(
+        self,
+        outcome: SolveOutcome,
+        decision: ConfidenceDecision,
+        submission_pool: ThreadPoolExecutor,
+        submissions: dict[
+            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+        ],
+    ) -> None:
+        future = submission_pool.submit(self._submit, outcome, decision)
+        submissions[future] = (outcome, decision)
+
     def _handle_solve(
         self,
         outcome: SolveOutcome,
         verifier_pool: ThreadPoolExecutor,
         verifiers: dict[Future[SolveOutcome], VerifyJob],
+        submission_pool: ThreadPoolExecutor,
+        submissions: dict[
+            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+        ],
     ) -> None:
         task_id = outcome.job.tile.id
         if outcome.error:
@@ -378,10 +403,14 @@ class Orchestrator:
             outcome.candidate, urgency=urgency
         )
         if self.config.mode == "practice_eval":
-            self._submit(outcome, decision)
+            self._queue_submit(
+                outcome, decision, submission_pool, submissions
+            )
             return
         if decision.should_submit:
-            self._submit(outcome, decision)
+            self._queue_submit(
+                outcome, decision, submission_pool, submissions
+            )
             return
         if (
             self.config.verifier_workers
@@ -402,7 +431,13 @@ class Orchestrator:
         )
 
     def _handle_verify(
-        self, verifier: SolveOutcome, verify_job: VerifyJob
+        self,
+        verifier: SolveOutcome,
+        verify_job: VerifyJob,
+        submission_pool: ThreadPoolExecutor,
+        submissions: dict[
+            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+        ],
     ) -> None:
         primary = verify_job.outcome
         assert primary.candidate is not None
@@ -433,7 +468,9 @@ class Orchestrator:
         matched_outcome = replace(primary, candidate=matched)
         decision = self.confidence.assess(matched)
         if decision.should_submit:
-            self._submit(matched_outcome, decision)
+            self._queue_submit(
+                matched_outcome, decision, submission_pool, submissions
+            )
         else:
             self.log(
                 f"{task_id}: matching verifier still below confidence gate"
@@ -444,12 +481,16 @@ class Orchestrator:
         next_board_refresh = 0.0
         active: dict[Future[SolveOutcome], SolveJob] = {}
         verifiers: dict[Future[SolveOutcome], VerifyJob] = {}
+        submissions: dict[
+            Future[None], tuple[SolveOutcome, ConfidenceDecision]
+        ] = {}
         last_phase: Phase | None = None
         with (
             ThreadPoolExecutor(max_workers=self.config.workers) as solver_pool,
             ThreadPoolExecutor(
                 max_workers=max(1, self.config.verifier_workers)
             ) as verifier_pool,
+            ThreadPoolExecutor(max_workers=1) as submission_pool,
         ):
             while True:
                 now = time.monotonic()
@@ -481,8 +522,13 @@ class Orchestrator:
                         } | {
                             job.outcome.job.tile.id
                             for job in verifiers.values()
+                        } | {
+                            outcome.job.tile.id
+                            for outcome, _ in submissions.values()
                         }
                         slots = self.config.workers - len(active)
+                        if len(submissions) >= self.config.workers * 2:
+                            slots = 0
                         ranked = self._rank_available(snapshot, reserved)
                         for tile, priority in self._diverse_take(ranked, slots):
                             solve_number = self._solve_counts.get(tile.id, 0) + 1
@@ -491,7 +537,7 @@ class Orchestrator:
                             job = SolveJob(
                                 tile,
                                 priority,
-                                self._temperature(tile.id, solve_number),
+                                self._temperature(tile, solve_number),
                                 solve_number,
                             )
                             active[solver_pool.submit(self._solve, job)] = job
@@ -504,7 +550,7 @@ class Orchestrator:
                                 f"thinking={self.config.thinking_budget(tile.points)}"
                             )
 
-                futures = set(active) | set(verifiers)
+                futures = set(active) | set(verifiers) | set(submissions)
                 if not futures:
                     snapshot = self._get_snapshot()
                     if (
@@ -525,8 +571,21 @@ class Orchestrator:
                     if future in active:
                         active.pop(future)
                         self._handle_solve(
-                            future.result(), verifier_pool, verifiers
+                            future.result(),
+                            verifier_pool,
+                            verifiers,
+                            submission_pool,
+                            submissions,
+                        )
+                    elif future in verifiers:
+                        verify_job = verifiers.pop(future)
+                        self._handle_verify(
+                            future.result(),
+                            verify_job,
+                            submission_pool,
+                            submissions,
                         )
                     else:
-                        verify_job = verifiers.pop(future)
-                        self._handle_verify(future.result(), verify_job)
+                        submissions.pop(future)
+                        future.result()
+                    next_board_refresh = 0.0

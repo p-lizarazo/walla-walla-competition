@@ -38,9 +38,21 @@ jobs:
       - name: List archive contents
         run: python -m zipfile -l agent.zip
 
+      # GitHub re-zips every artifact on download, so uploading agent.zip
+      # directly would hand you a wrapper zip containing agent.zip — and
+      # submitting that puts agent.zip, not main.py, at the archive root.
+      # Uploading the validated archive's *contents* makes GitHub's wrapper
+      # the submittable archive: it downloads as agent.zip with main.py at
+      # the root, ready to drag onto /dashboard.
+      - name: Unpack the validated archive for upload
+        run: |
+          mkdir -p dist/agent
+          python -m zipfile -e agent.zip dist/agent
+          ls -R dist/agent
+
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-zip
-          path: agent.zip
+          name: agent
+          path: dist/agent/
           if-no-files-found: error
           retention-days: 30

@@ -30,6 +30,27 @@ _PHASE_BOARD = {
     Phase.GAME: "main",
 }
 
+_SECRET_FIELDS = {
+    "api_key",
+    "team_api_key",
+    "anthropic_api_key",
+    "access_token",
+    "refresh_token",
+    "token",
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "credential",
+}
+
+
+def _secret_field(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _SECRET_FIELDS or lowered.endswith(
+        ("_api_key", "_password", "_secret", "_credential")
+    )
+
 
 class GameClient:
     def __init__(self, config: Config):
@@ -135,10 +156,7 @@ class GameClient:
         safe = {
             key: value
             for key, value in payload.items()
-            if not any(
-                secret in key.lower()
-                for secret in ("key", "token", "secret", "credential")
-            )
+            if not _secret_field(key)
         }
         return DashboardSnapshot(safe, time.monotonic())
 

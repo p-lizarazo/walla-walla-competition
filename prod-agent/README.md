@@ -137,37 +137,42 @@ repair.
 Validate the production code with:
 
 ```bash
-cd prod-agent
-python -m pytest tests -q
-python build_agent.py                    # writes ../agent.zip
-python validate_agent.py ../agent.zip    # proves the runner can boot it
+python -m pytest prod-agent/tests -q
+python ops/build_agent.py                # writes ./agent.zip
+python ops/validate_agent.py agent.zip   # proves the runner can boot it
 ```
 
 Artifact creation and deployment are owned by the repository ops pipeline.
 Keep runtime modules, tests, practice results, and credentials separated so
 that pipeline can package only the production allowlist.
 
-`build_agent.py` packages that allowlist, flattening `main.py` to the archive
-root, and rejects caches, practice results, `.env` files, oversized archives,
-and a nested `main.py`.
+`ops/build_agent.py` packages the runtime tree, flattening `main.py` to the
+archive root, and excludes tests, evals, caches, dot-files, `.env` files, and
+practice ledgers.
 
-`validate_agent.py` then checks the archive's *behavior*: it extracts the zip
-to a temporary directory and imports every shipped module, plus `main.py`
+`ops/validate_agent.py` then checks the archive's *behavior*: it extracts the
+zip to a temporary directory and imports every shipped module, plus `main.py`
 itself, with nothing but the extracted copy on `sys.path`. That is what
 catches a module that was refactored away while something still imports it —
 a failure that otherwise appears only as a `ModuleNotFoundError` in
 `/api/agent/logs`, after the deploy has already replaced a working agent.
 
 The `agent` GitHub Actions workflow (`.github/workflows/agent.yml`) runs those
-three steps on every push, on Python 3.12 with the hosted image's packages,
-and uploads the result as the `agent-zip` artifact. Download it from the run
-summary when you want the exact archive CI verified.
+three steps on every push, on Python 3.12 with the hosted image's packages.
 
-Deploy by dragging `agent.zip` onto the dashboard or:
+It then uploads the validated archive's *contents* as the artifact named
+`agent`. That indirection is deliberate: GitHub re-zips every artifact on
+download, so uploading `agent.zip` itself would hand you a wrapper zip
+containing `agent.zip`, and submitting that wrapper puts `agent.zip` — not
+`main.py` — at the archive root, which fails to deploy. Uploading the contents
+makes GitHub's wrapper the real archive, so the run summary's **`agent`**
+artifact downloads as `agent.zip` with `main.py` at its root.
+
+Deploy by dragging that downloaded `agent.zip` onto the dashboard, or:
 
 ```bash
 curl -X POST "$JEOPARDY_BASE_URL/api/agent/submit" \
-  -H "X-Api-Key: $TEAM_API_KEY" -F file=@../agent.zip
+  -H "X-Api-Key: $TEAM_API_KEY" -F file=@agent.zip
 ```
 
 Uploading deploys and restarts immediately. Dependencies in

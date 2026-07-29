@@ -57,6 +57,7 @@ class Config:
     thinking_budget_500: int
     playbooks_path: str
     practice_results_path: str
+    task_filter: tuple[str, ...]
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -89,7 +90,7 @@ class Config:
             max_tokens=_int("MAX_TOKENS", 4096),
             max_tool_output=_int("MAX_TOOL_OUTPUT", 12_000),
             python_timeout_seconds=_int("PYTHON_TIMEOUT_SECONDS", 60),
-            python_memory_mb=_int("PYTHON_MEMORY_MB", 512),
+            python_memory_mb=_int("PYTHON_MEMORY_MB", 1024),
             board_poll_seconds=_float("BOARD_POLL_SECONDS", 3.0, minimum=0.5),
             run_duration_seconds=_float(
                 "RUN_DURATION_SECONDS", 0.0, minimum=0.0
@@ -107,6 +108,11 @@ class Config:
             playbooks_path=os.environ.get("PLAYBOOKS_PATH", "playbooks.json"),
             practice_results_path=os.environ.get(
                 "PRACTICE_RESULTS_PATH", "practice_results.jsonl"
+            ),
+            task_filter=tuple(
+                task_id.strip()
+                for task_id in os.environ.get("TASK_FILTER", "").split(",")
+                if task_id.strip()
             ),
         )
 

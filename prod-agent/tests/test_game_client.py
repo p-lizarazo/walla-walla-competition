@@ -37,6 +37,7 @@ def config() -> Config:
         thinking_budget_500=2048,
         playbooks_path="playbooks.json",
         practice_results_path="practice_results.jsonl",
+        task_filter=(),
     )
 
 
@@ -91,7 +92,9 @@ class GameClientTests(unittest.TestCase):
 
         dashboard = client.dashboard()
 
-        self.assertEqual(dashboard.payload, {"score": 100})
+        self.assertEqual(
+            dashboard.payload, {"score": 100, "token_budget": 123}
+        )
 
     def test_practice_eval_includes_previously_solved_tiles(self) -> None:
         response = Mock()
