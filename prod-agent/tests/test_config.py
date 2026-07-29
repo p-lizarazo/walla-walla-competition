@@ -17,7 +17,7 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_are_production_safe(self) -> None:
         with patch.dict(os.environ, self.base_env(), clear=True):
             config = Config.from_env()
-        self.assertEqual(config.mode, "scored")
+        self.assertEqual(config.mode, "auto")
         self.assertEqual(config.model, "claude-haiku-4-5")
         self.assertGreaterEqual(config.submission_interval_seconds, 3)
         self.assertEqual(config.cpu_workers, 1)

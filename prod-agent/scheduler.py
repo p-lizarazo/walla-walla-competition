@@ -117,8 +117,8 @@ class Scheduler:
             raise ValueError("wrong_penalty must be between zero and one")
         if initial_500_boost < 1:
             raise ValueError("initial_500_boost must be at least one")
-        if mode not in {"scored", "practice_eval"}:
-            raise ValueError("mode must be scored or practice_eval")
+        if mode not in {"auto", "scored", "practice_eval"}:
+            raise ValueError("mode must be auto, scored, or practice_eval")
         self._calibration = dict(calibration or {})
         self.wrong_penalty = wrong_penalty
         self.initial_500_boost = initial_500_boost
@@ -326,10 +326,19 @@ class Scheduler:
                 raise ValueError(
                     "practice_eval mode only accepts the practice board"
                 )
-        elif board.phase not in {Phase.ROUND1, Phase.GAME}:
+        elif self.mode == "scored" and board.phase not in {
+            Phase.ROUND1,
+            Phase.GAME,
+        }:
             raise ValueError(
                 "scored mode requires a currently playable scored board"
             )
+        elif self.mode == "auto" and board.phase not in {
+            Phase.PRACTICE,
+            Phase.ROUND1,
+            Phase.GAME,
+        }:
+            raise ValueError("auto mode requires a playable board")
         return self.rank(board.tiles, attempts, **kwargs)
 
 

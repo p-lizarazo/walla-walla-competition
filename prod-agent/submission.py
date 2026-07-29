@@ -118,10 +118,20 @@ class SubmissionLane:
         mode = getattr(self.config, "mode", "scored")
         if mode == "practice_eval":
             playable = snapshot.phase is Phase.PRACTICE
+        elif mode == "auto":
+            playable = snapshot.phase in {
+                Phase.PRACTICE,
+                Phase.ROUND1,
+                Phase.GAME,
+            }
         else:
             playable = snapshot.phase in {Phase.ROUND1, Phase.GAME}
         already_solved = (
-            task_id in snapshot.solved_ids and mode != "practice_eval"
+            task_id in snapshot.solved_ids
+            and not (
+                snapshot.phase is Phase.PRACTICE
+                and mode in {"auto", "practice_eval"}
+            )
         )
         return (
             self._clock() - snapshot.fetched_monotonic <= self._board_max_age

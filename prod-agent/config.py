@@ -65,9 +65,11 @@ class Config:
         team_api_key = os.environ.get("TEAM_API_KEY", "")
         if not base_url or not team_api_key:
             raise ValueError("JEOPARDY_BASE_URL and TEAM_API_KEY are required")
-        mode = os.environ.get("AGENT_MODE", "scored").lower()
-        if mode not in {"scored", "practice_eval"}:
-            raise ValueError("AGENT_MODE must be scored or practice_eval")
+        mode = os.environ.get("AGENT_MODE", "auto").lower()
+        if mode not in {"auto", "scored", "practice_eval"}:
+            raise ValueError(
+                "AGENT_MODE must be auto, scored, or practice_eval"
+            )
         strong_threshold = _float("STRONG_CONFIDENCE_THRESHOLD", 0.90)
         urgent_floor = _float("URGENT_CONFIDENCE_FLOOR", 0.80)
         if not 0 <= urgent_floor <= strong_threshold <= 1:

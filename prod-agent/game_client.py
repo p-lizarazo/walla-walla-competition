@@ -110,7 +110,8 @@ class GameClient:
         board_name = _PHASE_BOARD.get(phase)
         solved = frozenset((payload.get("you") or {}).get("solved_ids") or ())
         include_solved_practice = (
-            self.config.mode == "practice_eval" and phase is Phase.PRACTICE
+            self.config.mode in {"auto", "practice_eval"}
+            and phase is Phase.PRACTICE
         )
         tiles: list[Tile] = []
         if board_name:

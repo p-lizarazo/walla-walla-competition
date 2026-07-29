@@ -232,10 +232,24 @@ class Orchestrator:
     def _playable(self, snapshot: BoardSnapshot) -> bool:
         if self.config.mode == "practice_eval":
             return snapshot.phase is Phase.PRACTICE
+        if self.config.mode == "auto":
+            return snapshot.phase in {
+                Phase.PRACTICE,
+                Phase.ROUND1,
+                Phase.GAME,
+            }
         return snapshot.phase in {Phase.ROUND1, Phase.GAME}
 
+    def _evaluation_active(self) -> bool:
+        snapshot = self._get_snapshot()
+        return (
+            snapshot is not None
+            and snapshot.phase is Phase.PRACTICE
+            and self.config.mode in {"auto", "practice_eval"}
+        )
+
     def _max_solves(self, tile: Tile) -> int:
-        if self.config.mode == "practice_eval":
+        if self._evaluation_active():
             return 1
         return 2 if tile.points >= 400 else 1
 
@@ -261,7 +275,7 @@ class Orchestrator:
             if tile.id in reserved:
                 continue
             if (
-                self.config.mode == "practice_eval"
+                self._evaluation_active()
                 and tile.id in self._practice_attempted
             ):
                 continue
@@ -313,7 +327,7 @@ class Orchestrator:
         failure_stage: str | None = None,
         error_type: str | None = None,
     ) -> None:
-        if self.config.mode != "practice_eval":
+        if not self._evaluation_active():
             return
         candidate = outcome.candidate
         self.practice_log.append(
@@ -342,7 +356,7 @@ class Orchestrator:
         decision: ConfidenceDecision,
     ) -> None:
         assert outcome.candidate is not None
-        lane_decision = None if self.config.mode == "practice_eval" else decision
+        lane_decision = None if self._evaluation_active() else decision
         payload = self._submission.try_submit(outcome.candidate, lane_decision)
         result = str(payload.get("result") or "unknown")
         self.log(
@@ -402,7 +416,7 @@ class Orchestrator:
         decision = self.confidence.assess(
             outcome.candidate, urgency=urgency
         )
-        if self.config.mode == "practice_eval":
+        if self._evaluation_active():
             self._queue_submit(
                 outcome, decision, submission_pool, submissions
             )
@@ -541,7 +555,7 @@ class Orchestrator:
                                 solve_number,
                             )
                             active[solver_pool.submit(self._solve, job)] = job
-                            if self.config.mode == "practice_eval":
+                            if self._evaluation_active():
                                 self._practice_attempted.add(tile.id)
                             self.log(
                                 f"{tile.id}: scheduled points={tile.points} "
@@ -554,7 +568,7 @@ class Orchestrator:
                 if not futures:
                     snapshot = self._get_snapshot()
                     if (
-                        self.config.mode == "practice_eval"
+                        self._evaluation_active()
                         and snapshot is not None
                         and self._playable(snapshot)
                         and not self._rank_available(snapshot, set())
