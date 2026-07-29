@@ -1,0 +1,23 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local Python environments and caches
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Local tooling and generated archives
+.playwright-mcp/
+*.log
+*.zip
+agent.zip
+
+# Runtime learning data
+**/learnings.jsonl
+
+# macOS metadata
+.DS_Store
